@@ -34,8 +34,8 @@
 > **CME futures via Sierra Chart over the DTC protocol** (localhost:11099), and
 > the traded instrument is **MGC (Micro Gold)** instead of spot XAUUSD.
 >
-> Everything below this banner that mentions cTrader, XAUUSD, lots or fractional
-> position sizes is **historical**. What changed:
+> The rest of this document describes the system as it is now. Where cTrader,
+> XAUUSD or lots still appear, they are labelled as history. What changed:
 >
 > | Was | Is |
 > |---|---|
@@ -81,15 +81,14 @@
 > `HANDOFF.md` has not been rewritten for the pivot and still describes the
 > cTrader deployment.
 
-> **Picking this up mid-project?** Read [HANDOFF.md](HANDOFF.md) first — it has
-> the current deployment state, verified account and contract facts, known
-> blockers, and the rules not to break. This file explains how the system works;
-> that one explains what state it is actually in.
+An automated intraday trading engine for CME futures: live prices and true
+exchange order-book depth over the DTC protocol from a local Sierra Chart
+server, ICT structure rules, an economic-calendar blackout filter, an optional
+Claude review layer, a hard risk manager, and a paper broker that simulates
+fills against the real feed.
 
-An automated intraday trading engine for a cTrader account: live prices and
-level-2 depth over the cTrader Open API, a trend-continuation signal, an
-economic-calendar blackout filter, an optional Claude review layer, a hard risk
-manager, and a paper broker that simulates fills against the real feed.
+The traded contract is **MGC** — CME Micro Gold, 10 oz, $10 per $1.00 move,
+$1.00 per tick. Positions are whole contracts; there is no fractional size.
 
 **Read this first.** This is a complete, working trading system. It is not a
 profitable strategy, and nobody can hand you one. The weights in
@@ -149,11 +148,12 @@ stop. Touches no network and no account.
 python run.py check
 ```
 
-Read-only. Connects, authenticates, prints the accounts on your token, the
-balance, the contract specification for each symbol, and 20 seconds of live
-spreads. It sends no orders. Run this before anything else — it tells you
-whether your configured `max_spread` is realistic for your broker and whether
-the smallest tradable lot already risks more than your per-trade cap.
+Read-only, and offline. Prints the pinned contract specification for each
+enabled instrument, converts every stop into ticks and into dollars per
+contract, sizes it against your risk cap, then probes the Sierra Chart DTC
+port. It sends no orders. Run this before anything else — it tells you whether
+one contract already risks more than your per-trade cap, which on a futures
+account is the difference between trading and refusing every signal.
 
 ```bash
 python run.py calibrate
@@ -189,13 +189,13 @@ part you will actually iterate on.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `risk_per_trade` | 5.00 | Cash risked per trade. Position size is derived from this and the stop, never chosen directly. |
-| `max_daily_loss` | 15.00 | Trading stops for the UTC day at this loss. |
-| `max_daily_profit` | 15.00 | Trading also stops after this gain — protecting a good day is a real edge. |
-| `max_daily_trades` | 10 | Overtrading cap. |
-| `max_consecutive_losses` | 3 | Three in a row triggers a 30-minute cooldown. |
-| `max_open_positions` | 1 | One position at a time across all symbols. |
-| `commission_per_lot` | 0.00 | **Set this from your broker's contract spec.** Leaving it at zero makes paper results look better than live ones ever will. |
+| `risk_per_trade` | 50.00 | Cash risked per trade. Size is derived from this and the stop, never chosen directly. **One MGC contract at the shipped 4.30 stop risks $43** — set this below that and every trade is refused, because there is nothing smaller than one contract to shrink into. |
+| `max_daily_loss` | 100.00 | Trading stops for the UTC day at this loss. |
+| `max_daily_profit` | 100.00 | Trading also stops after this gain — protecting a good day is a real edge. |
+| `max_daily_trades` | 6 | Overtrading cap. |
+| `max_consecutive_losses` | 2 | Two in a row triggers a 30-minute cooldown. |
+| `max_open_positions` | 1 | One position at a time across all contracts. |
+| `commission_per_contract` | 0.00 | **Set this from your broker's schedule** — MGC round turn is typically $1.00–$1.50 all-in. Leaving it at zero makes paper results look better than live ones ever will. |
 | `stop_distance` / `target_distance` | per symbol | In price units, sized for the 5-minute chart. 1:1.5 reward:risk. **Run `run.py calibrate` to replace these with measured values.** |
 | `max_spread` | per symbol | Hard veto. Check it against what `run.py check` reports. |
 | `min_confidence` | 0.35–0.40 | Signal strength floor. Raise to trade less. |
@@ -291,15 +291,16 @@ curve has a table view for anyone who cannot use the chart.
 
 ## Known limitations
 
-- P&L assumes the quote currency equals the account's deposit currency. True
-  for XAUUSD, EURUSD, US30 and US500 on a USD account; the engine warns at
-  startup if you enable a symbol where it does not hold.
+- P&L assumes the contract settles in the account's deposit currency. True for
+  USD-denominated CME contracts on a USD account; the engine warns at startup
+  if you enable one where it does not hold.
 - Paper fills use the real bid/ask and charge spread and commission, but cannot
   model slippage on a fast market or a stop gapping through a level. Live
   results will be worse than paper. `PaperBroker` accepts `slippage_price` and
   `stop_slippage_price` if you want to make it pessimistic deliberately.
-- Level-2 depth is a retail feed, showing a fraction of real liquidity. Resting
-  size is not intent. It is weighted at 15 of 100 points for that reason.
+- Level-2 depth is now the exchange's own consolidated book rather than a
+  broker-constructed view, which is the whole reason for the CME migration.
+  Resting size still is not intent, so it stays weighted at 15 of 100 points.
 - The engine holds at most one position and does not trail stops, scale in or
   hedge.
 - Reconnects re-subscribe, but a position opened live and closed while the
@@ -310,8 +311,11 @@ curve has a table view for anyone who cannot use the chart.
 1. `selftest`, then `check`, and fix anything either one warns about.
 2. Run disarmed for a day. Read the log. Do the signals appear where you would
    have taken them?
-3. Switch `CTRADER_HOST_TYPE=demo` with a demo account and run `--arm` for at
-   least two weeks. Do not change parameters mid-run; you need a clean sample.
-4. Review the CSV. If it is not profitable after commission on demo, it will
-   not be profitable live. Change one thing, run another two weeks.
-5. Only then consider live, at the smallest size your broker allows.
+3. Point Sierra Chart at a **simulated** trade account, keep
+   `EXECUTION_MODE=paper`, and run `--arm` for at least two weeks. Do not change
+   parameters mid-run; you need a clean sample.
+4. Review the CSV. If it is not profitable after commission in simulation, it
+   will not be profitable live. Change one thing, run another two weeks.
+5. Only then consider live — and only on an account that can absorb $43 of risk
+   per trade as 1–2% of capital, which means roughly $2,000–$4,000. Below that,
+   this is a data-collection tool, not a trading system.
