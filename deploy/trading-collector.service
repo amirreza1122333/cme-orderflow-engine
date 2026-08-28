@@ -1,0 +1,52 @@
+# systemd unit for the ICT data collector.
+#   sudo cp deploy/trading-collector.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now trading-collector
+#
+# Deliberately a SEPARATE service from trading-bot, with its own broker
+# session. That is what makes the isolation bidirectional:
+#
+#   collector dies -> engine keeps trading
+#   engine dies    -> collector keeps recording
+#
+# An in-process collector could only ever give you the first. The cost is a
+# second DTC session and a second copy of the bar aggregation.
+#
+# This process sends NO orders. There is no order-writing code path in it.
+
+[Unit]
+Description=ICT feature collector (read-only, writes CSV)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading-bot
+ExecStart=/home/ubuntu/trading-bot/venv/bin/python run.py collect
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Same hardening as the engine. Writes are confined to data/ and logs/.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/trading-bot/data /home/ubuntu/trading-bot/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

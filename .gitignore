@@ -1,0 +1,45 @@
+# Secrets. The .env holds live broker credentials - never commit it.
+.env
+*.pem
+*.key
+
+# Runtime output: journals, state snapshots, engine logs
+logs/
+*.log
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Collector output. Feature CSVs, their manifests and the training set are
+# data, not source - and a synthetic replay dropped in here would be
+# indistinguishable from collected market data to ict/prepare.py.
+data/
+models/
+
+# ---------------------------------------------------------------------------
+# EXCLUDED FROM THE PUBLIC REPOSITORY
+# ---------------------------------------------------------------------------
+
+# Proprietary strategy layer. The ICT signal logic, the 36-feature extractor
+# and the ML pipeline are the edge; the infrastructure around them is what is
+# published. Only core/engine.py and run.py import from here.
+ict/
+
+# Internal operations handoff. Contains live broker account identifiers, an
+# account balance and a production server IP with its SSH username. Must never
+# be committed to a public remote.
+HANDOFF.md
+
+# Local Claude Code tooling config - machine-specific, not project source.
+.claude/

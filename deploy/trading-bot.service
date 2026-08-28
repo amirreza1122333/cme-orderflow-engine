@@ -1,0 +1,47 @@
+# systemd unit for the trading engine.
+#   sudo cp deploy/trading-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now trading-bot
+#
+# StartLimit* belong in [Unit] - in [Service] systemd ignores them, which
+# silently disables crash-loop protection.
+
+[Unit]
+Description=CME futures trading engine (Sierra Chart / DTC, paper mode)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading-bot
+ExecStart=/home/ubuntu/trading-bot/venv/bin/python run.py run --arm
+Restart=always
+RestartSec=30
+
+# The engine writes its own dated logs under logs/; sending stdout to the
+# journal avoids a second, unbounded copy of the same lines.
+StandardOutput=journal
+StandardError=journal
+
+# Hardening: the engine needs outbound TCP and its own directory. Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/trading-bot/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

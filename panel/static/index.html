@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Trading engine</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>▲</text></svg>">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-left">
+    <h1>Trading engine</h1>
+    <span class="pill" id="mode-pill" data-status="neutral">
+      <span class="pill-glyph" aria-hidden="true">●</span><span id="mode-text">loading</span>
+    </span>
+    <span class="pill" id="conn-pill" data-status="neutral">
+      <span class="pill-glyph" aria-hidden="true">●</span><span id="conn-text">connecting</span>
+    </span>
+  </div>
+  <div class="bar-right">
+    <span class="muted" id="updated">—</span>
+    <button type="button" id="theme-toggle" class="ghost" aria-label="Switch colour theme">Theme</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- Hero + KPI row -->
+  <section class="panel hero-panel" aria-labelledby="h-account">
+    <h2 id="h-account" class="sr-only">Account</h2>
+    <div class="hero">
+      <p class="label">Balance</p>
+      <p class="hero-value" id="balance">—</p>
+      <p class="hero-sub" id="balance-sub">—</p>
+    </div>
+    <div class="kpis" id="kpis"></div>
+  </section>
+
+  <!-- Equity curve -->
+  <section class="panel" aria-labelledby="h-equity">
+    <div class="panel-head">
+      <div>
+        <h2 id="h-equity">Equity</h2>
+        <p class="muted" id="equity-sub">Balance after each closed trade</p>
+      </div>
+      <button type="button" class="ghost" id="equity-table-toggle"
+              aria-expanded="false" aria-controls="equity-table">Table view</button>
+    </div>
+    <div class="chart" id="equity-chart"></div>
+    <div id="equity-table" class="table-wrap" hidden></div>
+  </section>
+
+  <div class="grid-2">
+
+    <!-- Risk envelope -->
+    <section class="panel" aria-labelledby="h-risk">
+      <div class="panel-head"><h2 id="h-risk">Risk envelope</h2></div>
+      <div id="risk-meters"></div>
+    </section>
+
+    <!-- Claude analyst -->
+    <section class="panel" aria-labelledby="h-analyst">
+      <div class="panel-head">
+        <h2 id="h-analyst">Claude analyst</h2>
+        <span class="pill" id="analyst-pill" data-status="neutral">
+          <span class="pill-glyph" aria-hidden="true">●</span><span id="analyst-state">—</span>
+        </span>
+      </div>
+      <div id="analyst-body"></div>
+    </section>
+
+  </div>
+
+  <!-- Symbols -->
+  <section class="panel" aria-labelledby="h-symbols">
+    <div class="panel-head"><h2 id="h-symbols">Instruments</h2></div>
+    <div id="symbols"></div>
+  </section>
+
+  <div class="grid-2">
+
+    <!-- Why no trades -->
+    <section class="panel" aria-labelledby="h-vetoes">
+      <div class="panel-head">
+        <h2 id="h-vetoes">Why it is not trading</h2>
+        <p class="muted">Cumulative since start</p>
+      </div>
+      <div class="chart" id="veto-chart"></div>
+    </section>
+
+    <!-- Upcoming news -->
+    <section class="panel" aria-labelledby="h-news">
+      <div class="panel-head"><h2 id="h-news">High-impact news</h2></div>
+      <div id="news-body"></div>
+    </section>
+
+  </div>
+
+  <!-- Positions -->
+  <section class="panel" aria-labelledby="h-positions">
+    <div class="panel-head"><h2 id="h-positions">Open positions</h2></div>
+    <div id="positions"></div>
+  </section>
+
+  <!-- Trades -->
+  <section class="panel" aria-labelledby="h-trades">
+    <div class="panel-head">
+      <h2 id="h-trades">Closed trades</h2>
+      <p class="muted" id="trades-sub">—</p>
+    </div>
+    <div id="trades" class="table-wrap"></div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <p class="muted">
+    Read-only view. This panel cannot open, close or configure anything &mdash;
+    the API is three GET endpoints and holds no credentials.
+  </p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

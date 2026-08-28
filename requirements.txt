@@ -1,0 +1,32 @@
+# Core - required
+#
+# DTC protocol transport: none. The Sierra Chart DTC server speaks a binary
+# framed protocol over a plain TCP socket, which the standard library covers
+# completely - `socket` for the connection and `struct` for the little-endian
+# message headers and payloads. There is no third-party DTC package here on
+# purpose: the wire format is small, stable and published, and a dependency
+# that wraps it would only add a version to pin.
+#     -> see core/dtc_client.py
+#
+# REMOVED 2026-08-21: ctrader-open-api==0.9.2 (and the Twisted + protobuf +
+# service_identity stack it dragged in). The cTrader Open API path is dead;
+# core/ctrader_DEPRECATED.py is kept for reference only and is not imported by
+# anything the engine runs.
+
+requests>=2.31            # economic calendar fetch
+
+# Monitoring panel (read-only). The engine runs fine without these; only
+# `python -m panel.server` needs them.
+fastapi>=0.115
+uvicorn>=0.30
+
+# Optional - the engine runs without these
+anthropic>=0.92           # Claude analyst layer (needs ANTHROPIC_API_KEY)
+
+# ICT ML pipeline. Only ict/prepare.py and ict/train.py need these; the
+# collector and the engine run without them.
+pandas>=1.5
+numpy>=1.24
+scikit-learn>=1.3
+lightgbm>=4.0
+joblib>=1.3

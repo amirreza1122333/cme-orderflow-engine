@@ -1,0 +1,49 @@
+# systemd unit for the read-only monitoring panel.
+#   sudo cp deploy/trading-panel.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now trading-panel
+#
+# Binds to 127.0.0.1 only. To view it from your laptop, tunnel over SSH:
+#   ssh -N -L 8787:127.0.0.1:8787 ubuntu@<vps-ip>
+#   then open http://localhost:8787
+#
+# Do NOT change this to 0.0.0.0 to "make it easier" - that publishes a live
+# account dashboard to the internet. The server refuses to start on a public
+# interface unless you pass --i-understand-exposure AND set a 24+ char
+# PANEL_TOKEN, and even then it should sit behind TLS.
+
+[Unit]
+Description=Trading engine monitoring panel (read-only)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading-bot
+ExecStart=/home/ubuntu/trading-bot/venv/bin/python -m panel.server --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+# The panel only ever reads. Give it no write access at all.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
