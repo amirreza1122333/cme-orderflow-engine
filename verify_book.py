@@ -1,0 +1,70 @@
+"""Reconcile the locally maintained book against a fresh REST snapshot.
+
+Standard practice for any incrementally maintained order book: the deltas can
+drift, so periodically compare against an independent full snapshot. A book
+that silently diverges produces features that look plausible and are wrong.
+
+    python verify_book.py
+"""
+
+import logging
+import time
+
+import requests
+
+from core.bitstamp_client import BitstampClient, to_pair
+from core.marketdata import SymbolState
+from core.symbols import SymbolSpec
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+SYMBOL = "BTC/USD"
+DEPTH = 10
+SETTLE_SECONDS = 15
+
+spec = SymbolSpec(
+    symbol_id=1, name=SYMBOL, digits=2, tick_size=0.01,
+    contract_size=1.0, multiplier=1.0,
+    base_asset="BTC", quote_asset="USD", exchange="bitstamp",
+)
+state = SymbolState(spec=spec)
+
+client = BitstampClient()
+client.on_tick = lambda s, bid, ask, when: state.add_tick(bid, ask, timestamp=when)
+client.on_depth = lambda s, new_q, dead: state.apply_depth(new_q, dead)
+
+if not client.start():
+    raise SystemExit("could not reach Bitstamp")
+client.subscribe_depth([SYMBOL])
+
+print(f"maintaining the book for {SETTLE_SECONDS}s, then reconciling...")
+time.sleep(SETTLE_SECONDS)
+
+# Independent truth, fetched after the local book has been running on deltas.
+snap = requests.get(
+    f"https://www.bitstamp.net/api/v2/order_book/{to_pair(SYMBOL)}/", timeout=10
+).json()
+client.stop()
+
+mine_bids, mine_asks = state.book(DEPTH)
+their_bids = [(float(p), float(q)) for p, q in snap["bids"][:DEPTH]]
+their_asks = [(float(p), float(q)) for p, q in snap["asks"][:DEPTH]]
+
+def show(label, mine, theirs):
+    print(f"\n{label}")
+    print(f"{'local':>28}   {'rest snapshot':>28}   match")
+    for i in range(DEPTH):
+        m = f"{mine[i].size:.8f} @ {mine[i].price:.2f}" if i < len(mine) else "-"
+        t = f"{theirs[i][1]:.8f} @ {theirs[i][0]:.2f}" if i < len(theirs) else "-"
+        same = (
+            i < len(mine) and i < len(theirs)
+            and abs(mine[i].price - theirs[i][0]) < 0.005
+        )
+        print(f"{m:>28}   {t:>28}   {'OK' if same else 'DIFF'}")
+
+show("BIDS", mine_bids, their_bids)
+show("ASKS", mine_asks, their_asks)
+
+print(f"\nlocal levels tracked: {len(state.quotes)}")
+print("prices may differ by a tick or two - the snapshot is a moment later.")
+print("a whole side reading DIFF is a real bug, not timing.")
