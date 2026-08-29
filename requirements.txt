@@ -15,6 +15,11 @@
 
 requests>=2.31            # economic calendar fetch
 
+# Bitstamp market-data adapter (core/bitstamp_client.py). Sync client, not
+# asyncio: the engine is thread-based and a reader thread matches the DTC
+# threading contract the rest of the code is written against.
+websocket-client>=1.7
+
 # Monitoring panel (read-only). The engine runs fine without these; only
 # `python -m panel.server` needs them.
 fastapi>=0.115
