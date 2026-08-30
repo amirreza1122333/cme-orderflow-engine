@@ -79,11 +79,15 @@ class BitstampClient:
         ws_url: str = WS_URL,
         rest_url: str = REST_URL,
         reconnect_seconds: float = 5.0,
+        reseed_seconds: float = 300.0,
         client_name: str = "ict-bot",
     ) -> None:
         self.ws_url = ws_url
         self.rest_url = rest_url
         self.reconnect_seconds = reconnect_seconds
+        # How often to diff the local book against a fresh snapshot. Drift is
+        # slow and one-directional, so minutes is the right order, not seconds.
+        self.reseed_seconds = reseed_seconds
         self.client_name = client_name
 
         # Set by the caller before start(), same as DTCClient.
@@ -180,16 +184,13 @@ class BitstampClient:
         for symbol in symbols:
             try:
                 self._level_ids.setdefault(symbol, LevelIds())
-                with self._lock:
-                    self._seeded.discard(symbol)
-                    self._pending[symbol] = []
                 # Subscribe BEFORE fetching the snapshot. The other order loses
                 # every update that happens while the REST call is in flight,
                 # and the book stays quietly wrong for as long as the process
                 # runs. Deltas that arrive now are buffered, not dropped.
                 self._subscribe_channel(f"diff_order_book_{to_pair(symbol)}", symbol)
                 threading.Thread(
-                    target=self._seed_book,
+                    target=self._seed_loop,
                     args=(symbol,),
                     name=f"bitstamp-seed-{to_pair(symbol)}",
                     daemon=True,
@@ -197,14 +198,37 @@ class BitstampClient:
             except Exception as exc:  # noqa: BLE001 - depth is optional
                 log.warning("depth subscribe failed for %s: %s", symbol, exc)
 
-    def _seed_book(self, symbol: str) -> None:
-        """Fetch the REST snapshot, then replay the deltas that outran it.
+    def _seed_loop(self, symbol: str) -> None:
+        """Seed the book, then re-diff it against a fresh snapshot forever.
 
-        `diff_order_book` never sends a starting book, so without this the
-        local book is whatever subset of levels happened to change since we
-        connected - a sparse, arbitrary book whose top is not the real touch.
+        The first pass is the initial seed: `diff_order_book` sends no starting
+        book, so without it the local book is whatever subset of levels
+        happened to change since we connected.
+
+        Every later pass is repair. A delete is lost now and then - the REST
+        snapshot is served slightly stale, so whatever died between its
+        as-of moment and our subscription is in neither stream - and nothing
+        in the delta feed ever reports the loss. Measured drift was one or two
+        stale levels a few rows below the touch; the top of book stayed exact,
+        which is precisely why it is worth repairing on a schedule rather than
+        trusting it to stay small.
         """
+        while self._running.is_set():
+            self._seed_book(symbol)
+            # Sleep in one-second slices so stop() does not wait out the period.
+            for _ in range(max(1, int(self.reseed_seconds))):
+                if not self._running.is_set():
+                    return
+                time.sleep(1)
+
+    def _seed_book(self, symbol: str) -> None:
+        """Diff a fresh REST snapshot into the local book, deltas and all."""
         import requests
+
+        # Buffer incoming deltas for the duration of the request.
+        with self._lock:
+            self._seeded.discard(symbol)
+            self._pending[symbol] = []
 
         url = f"{self.rest_url}/order_book/{to_pair(symbol)}/"
         try:
@@ -215,11 +239,18 @@ class BitstampClient:
 
         ids = self._level_ids.setdefault(symbol, LevelIds())
 
-        new_quotes, _ = ids.translate(
+        # reconcile(), not translate(): a snapshot only says what IS resting.
+        # Absence is not a delete, and `apply_depth` drops a level only when
+        # its id arrives in deleted_ids - so a stale level would survive every
+        # re-seed unless the snapshot is diffed against what we believe.
+        new_quotes, deleted_ids = ids.reconcile(
             snapshot.get("bids") or [], snapshot.get("asks") or []
         )
-        self._fire(self.on_depth, symbol, new_quotes, [])
-        log.info("%s book seeded with %d levels", symbol, len(new_quotes))
+        self._fire(self.on_depth, symbol, new_quotes, deleted_ids)
+        log.info(
+            "%s book reconciled: %d levels, %d stale removed",
+            symbol, len(new_quotes), len(deleted_ids),
+        )
 
         # Drain whatever queued up while that request was in flight.
         #

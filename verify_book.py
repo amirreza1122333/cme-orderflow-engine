@@ -29,7 +29,9 @@ spec = SymbolSpec(
 )
 state = SymbolState(spec=spec)
 
-client = BitstampClient()
+# Short period so a run of this length exercises the repair path more than
+# once. The client's own default is minutes.
+client = BitstampClient(reseed_seconds=8)
 client.on_tick = lambda s, bid, ask, when: state.add_tick(bid, ask, timestamp=when)
 client.on_depth = lambda s, new_q, dead: state.apply_depth(new_q, dead)
 
@@ -40,11 +42,17 @@ client.subscribe_depth([SYMBOL])
 print(f"maintaining the book for {SETTLE_SECONDS}s, then reconciling...")
 time.sleep(SETTLE_SECONDS)
 
-# Independent truth, fetched after the local book has been running on deltas.
+# Freeze the local book BEFORE fetching the comparison snapshot.
+#
+# The other order makes the instrument lie: the reader thread keeps applying
+# deltas while the REST request is in flight, so the local book ends up AHEAD
+# of the snapshot and every order that arrived in that window reads as a stale
+# level we failed to delete. Stopping first means local can only ever be
+# behind, so a level local holds and the snapshot does not is genuinely stale.
+client.stop()
 snap = requests.get(
     f"https://www.bitstamp.net/api/v2/order_book/{to_pair(SYMBOL)}/", timeout=10
 ).json()
-client.stop()
 
 mine_bids, mine_asks = state.book(DEPTH)
 their_bids = [(float(p), float(q)) for p, q in snap["bids"][:DEPTH]]
@@ -66,5 +74,8 @@ show("BIDS", mine_bids, their_bids)
 show("ASKS", mine_asks, their_asks)
 
 print(f"\nlocal levels tracked: {len(state.quotes)}")
-print("prices may differ by a tick or two - the snapshot is a moment later.")
-print("a whole side reading DIFF is a real bug, not timing.")
+print()
+print("The snapshot is taken after the local book is frozen, so it is strictly")
+print("newer. Levels the snapshot has and the local book lacks are expected.")
+print("Levels the LOCAL book has and the snapshot lacks are the real signal:")
+print("those are deletes that went missing.")

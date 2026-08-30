@@ -114,3 +114,59 @@ def test_a_real_three_message_sequence(ids):
     # msg 3: 77683.23 and 77684.51 die; 77683.99 resizes, 77684.50 is new.
     assert len(d3) == 2
     assert len(q3) == 2
+
+
+# ---------------------------------------------------------------- reconcile
+#
+# A periodic snapshot is the only way to undo drift: deltas can silently lose
+# a delete, and nothing in the delta stream ever tells you so. But a snapshot
+# is only useful as a DIFF - "absent from the snapshot" has to be turned into
+# an explicit delete, or the stale level survives every re-seed forever.
+
+
+def test_live_tracks_what_is_currently_in_the_book(ids):
+    ids.translate([["100.00", "1.0"], ["99.00", "2.0"]], [])
+    assert ids.live == 2
+
+    ids.translate([["99.00", "0.00"]], [])
+    assert ids.live == 1
+
+
+def test_reconcile_adds_levels_the_snapshot_has(ids):
+    new_quotes, deleted = ids.reconcile([["100.00", "1.0"]], [["101.00", "2.0"]])
+
+    assert deleted == []
+    assert {q[2] for q in new_quotes} == {100.0, 101.0}
+
+
+def test_reconcile_deletes_levels_the_snapshot_does_not_have(ids):
+    """The drift fix. 99.00 is stale: we believe it, the exchange does not."""
+    ids.translate([["100.00", "1.0"], ["99.00", "2.0"]], [])
+
+    new_quotes, deleted = ids.reconcile([["100.00", "1.0"]], [])
+
+    assert len(deleted) == 1, "the stale level must be deleted, not merely unmentioned"
+    assert {q[2] for q in new_quotes} == {100.0}
+    assert ids.live == 1
+
+
+def test_reconcile_keeps_ids_stable(ids):
+    before, _ = ids.translate([["100.00", "1.0"]], [])
+    after, _ = ids.reconcile([["100.00", "1.5"]], [])
+
+    assert before[0][0] == after[0][0]
+
+
+def test_reconcile_leaves_the_book_equal_to_the_snapshot(ids):
+    ids.translate([["100.00", "1.0"], ["99.00", "1.0"], ["98.00", "1.0"]], [])
+
+    new_quotes, deleted = ids.reconcile([["100.00", "1.0"]], [["101.00", "1.0"]])
+
+    assert ids.live == 2
+    assert len(new_quotes) == 2
+    assert len(deleted) == 2
+
+
+def test_reconcile_on_a_fresh_map_deletes_nothing(ids):
+    new_quotes, deleted = ids.reconcile([["100.00", "1.0"]], [])
+    assert deleted == []
