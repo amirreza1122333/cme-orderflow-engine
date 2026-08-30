@@ -459,6 +459,22 @@ def command_collect(settings, feed: str, source: Path, out: Path) -> int:
                 collector = service.collectors.get(name)
                 if collector is not None:
                     log.info("RESULT %s", collector.status())
+        elif feed == "bitstamp":
+            # The client owns a reader thread; this loop only has to stay alive
+            # and report. Ctrl-C or a dropped connection ends it, and the
+            # `finally` below flushes whatever each collector has buffered.
+            log.info("Collecting from Bitstamp. Ctrl-C to stop and flush.")
+            last_report = 0.0
+            while service.client is not None and service.client.connected:
+                time.sleep(0.5)
+                now = time.time()
+                if now - last_report >= 30:
+                    last_report = now
+                    for name in service._symbols:
+                        collector = service.collectors.get(name)
+                        if collector is not None:
+                            log.info("%s", collector.status())
+            log.warning("Feed disconnected; stopping.")
         else:
             # TODO: Replace with DTC Client data feed - block here while the
             # client's reader thread delivers ticks, e.g.
@@ -703,10 +719,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--feed",
-        choices=["dry", "dtc"],
+        choices=["dry", "dtc", "bitstamp"],
         default="dry",
         help="dry = replay recorded CSVs offline (default); "
-             "dtc = live Sierra Chart feed (not implemented yet)",
+             "dtc = live Sierra Chart feed (not implemented yet), "
+             "bitstamp = free public crypto depth, for exercising the "
+             "pipeline without a Sierra Chart licence",
     )
     parser.add_argument(
         "--source",

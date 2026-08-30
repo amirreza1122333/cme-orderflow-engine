@@ -195,6 +195,12 @@ class Settings:
     ict_require_model: bool = True
 
     symbols: dict[str, SymbolConfig] = field(default_factory=dict)
+    # Instruments for the free research feed (--feed bitstamp). Kept apart from
+    # `symbols` on purpose: this project is a CME futures engine, and the crypto
+    # venue exists so the collector, the feature extractor and the panel can be
+    # exercised end-to-end without a Sierra Chart licence. Nothing here should
+    # ever be reachable from a production run.
+    research_symbols: dict[str, SymbolConfig] = field(default_factory=dict)
 
     @property
     def live_execution(self) -> bool:
@@ -316,6 +322,52 @@ def _default_symbols() -> dict[str, SymbolConfig]:
     }
 
 
+def _research_symbols() -> dict[str, SymbolConfig]:
+    """Instruments for the free Bitstamp feed. NOT a trading configuration.
+
+    CME depth needs a Sierra Chart licence and a paid Denali subscription.
+    Bitstamp publishes full book depth over a public WebSocket for nothing, so
+    every layer above the client - bar aggregation, the L2 book, the 36-feature
+    extractor, the panel - can be run and measured for free.
+
+    The microstructure is not CME's: 24/7, no auction, no settlement, a
+    different participant mix. A model trained on this data does not transfer
+    to MGC and is not meant to. This validates the engineering, not the edge.
+
+    The risk numbers below are placeholders sized off nothing in particular.
+    They exist so the gates have something to compare against on a paper run;
+    set them from measured ATR before drawing any conclusion from a result.
+    """
+    return {
+        # --------------------------------------------------- Bitstamp BTCUSD
+        # No separator in the name, deliberately. The name reaches a filename
+        # (ict_{symbol}_{date}.csv), a CSV column and a log line, and a "/"
+        # turns the first of those into a directory that does not exist.
+        # core.bitstamp_client.to_pair() lowercases it for the wire either way.
+        "BTCUSD": SymbolConfig(
+            name="BTCUSD",
+            # Venue fact:
+            contract_size=1.0,       # one unit is one BTC
+            multiplier=1.0,          # $1.00 price move  ->  $1.00 P&L per unit
+            tick_size=0.01,
+            digits=2,
+            min_contracts=1,         # the codebase dropped fractional sizing in
+            step_contracts=1,        # the futures pivot; one unit is the floor
+            exchange="bitstamp",
+            base_asset="BTC",
+            quote_asset="USD",
+            # Placeholders - see the docstring:
+            enabled=True,
+            tradable=False,          # no order path exists on this adapter
+            stop_distance=150.0,
+            target_distance=225.0,
+            max_spread=5.00,
+            min_confidence=0.35,
+            min_seconds_between_trades=900,
+        ),
+    }
+
+
 def _as_bool(value: str, default: bool = False) -> bool:
     if value is None or value == "":
         return default
@@ -360,6 +412,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         strategy_mode=env.get("STRATEGY_MODE", "ict").strip().lower(),
         ict_require_model=_as_bool(env.get("ICT_REQUIRE_MODEL", "true"), True),
         symbols=_default_symbols(),
+        research_symbols=_research_symbols(),
     )
 
     if settings.strategy_mode not in {"ema", "ict"}:
