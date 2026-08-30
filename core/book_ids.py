@@ -27,9 +27,13 @@ class LevelIds:
     """
 
     def __init__(self) -> None:
-        # (side, price) -> quote_id
+        # (side, price) -> quote_id. Append-only: an id, once assigned to a
+        # price, is that price's id forever.
         self._ids: dict[tuple[str, float], int] = {}
         self._next_id: int = 1
+        # The subset we currently believe is resting in the book. Needed only
+        # by reconcile(), which has to know what to delete.
+        self._live: set[tuple[str, float]] = set()
 
     def _id_for(self, side: str, price: float) -> int:
         """Existing id for this level, or a freshly minted one."""
@@ -69,11 +73,55 @@ class LevelIds:
 
                 if size > 0:
                     new_quotes.append((self._id_for(side, price), side, price, size))
+                    self._live.add((side, price))
                 elif (side, price) in self._ids:
                     # Size zero: the level left the book. Only levels we have
                     # actually seen can be deleted.
                     deleted_ids.append(self._ids[(side, price)])
+                    self._live.discard((side, price))
 
+        return new_quotes, deleted_ids
+
+    # ------------------------------------------------------------- reconcile
+
+    @property
+    def live(self) -> int:
+        """How many levels we currently believe are resting in the book."""
+        return len(self._live)
+
+    def reconcile(
+        self, bids: list, asks: list
+    ) -> tuple[list[tuple[int, str, float, float]], list[int]]:
+        """Diff a full snapshot against what we believe, and return the repair.
+
+        Deltas lose a delete now and then - a snapshot served from cache is
+        older than the subscription, and whatever died in that gap is in
+        neither stream. Nothing in the delta feed ever reports the loss, so the
+        stale level sits a few rows below the touch, quietly wrong.
+
+        Re-seeding alone does not fix it. A snapshot only says what IS there;
+        absence is not a delete, and `apply_depth` removes a level only when
+        its id arrives in `deleted_ids`. So the snapshot has to be diffed:
+
+            deleted = what we believe is live - what the snapshot lists
+
+        After this call the local book equals the snapshot exactly.
+        """
+        new_quotes: list[tuple[int, str, float, float]] = []
+        seen: set[tuple[str, float]] = set()
+
+        for side, levels in (("bid", bids), ("ask", asks)):
+            for raw_price, raw_size in levels:
+                price = float(raw_price)
+                size = float(raw_size)
+                if size <= 0:
+                    continue  # a snapshot should not carry these; ignore if it does
+                key = (side, price)
+                seen.add(key)
+                new_quotes.append((self._id_for(side, price), side, price, size))
+
+        deleted_ids = [self._ids[key] for key in self._live - seen]
+        self._live = seen
         return new_quotes, deleted_ids
 
     def __len__(self) -> int:
