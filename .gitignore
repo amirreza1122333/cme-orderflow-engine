@@ -43,3 +43,6 @@ HANDOFF.md
 
 # Local Claude Code tooling config - machine-specific, not project source.
 .claude/
+
+features/
+features_*/
