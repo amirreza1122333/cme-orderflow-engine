@@ -51,6 +51,12 @@ log = logging.getLogger("bitstamp")
 WS_URL = "wss://ws.bitstamp.net"
 REST_URL = "https://www.bitstamp.net/api/v2"
 
+# The endpoint's own list, verified against it rather than copied from a doc.
+# The engine's SEED_PLAN needs 300 / 900 / 3600 / 86400; all four are here.
+OHLC_STEPS = (60, 180, 300, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 259200)
+# Hard cap: 1001 is refused with a validation error, so a long window pages.
+OHLC_MAX_LIMIT = 1000
+
 
 def to_pair(symbol: str) -> str:
     """'BTC/USD' -> 'btcusd'. Callers work in names; the wire wants pairs."""
@@ -286,6 +292,19 @@ class BitstampClient:
             raise DTCError("not connected")
         ws.send(json.dumps(payload))
 
+    def _get_ohlc(self, pair: str, step: int, start: int, limit: int) -> list[dict]:
+        """One page of raw OHLC rows. The only part of history() that does I/O,
+        kept separate so the paging logic can be tested without a network."""
+        import requests
+
+        response = requests.get(
+            f"{self.rest_url}/ohlc/{pair}/",
+            params={"step": step, "limit": limit, "start": start},
+            timeout=20,
+        )
+        response.raise_for_status()
+        return (response.json().get("data") or {}).get("ohlc") or []
+
     def history(
         self,
         symbol: str,
@@ -294,8 +313,64 @@ class BitstampClient:
         end: datetime,
         max_bars: int = 0,
     ) -> list[Bar]:
-        """Historical OHLC from the REST API. Not written yet."""
-        raise NotImplementedError("TODO: GET {rest}/ohlc/{pair}/?step=&limit=")
+        """Historical OHLC bars, oldest first. BLOCKING - never call from a callback.
+
+        Same contract as `DTCClient.history`: seeds the indicator warm-up at
+        startup, returns an empty list when the venue has no data for the
+        window rather than raising, because one bare symbol must not stop the
+        process from starting.
+
+        An unsupported `period_seconds` DOES raise. That is a wiring mistake,
+        not a data condition, and a silent empty list would surface much later
+        as indicators that never warmed up.
+        """
+        if period_seconds not in OHLC_STEPS:
+            raise DTCError(
+                f"step {period_seconds}s is not offered by Bitstamp; "
+                f"pick one of {OHLC_STEPS}"
+            )
+
+        pair = to_pair(symbol)
+        window_start = int(start.timestamp())
+        window_end = int(end.timestamp())
+
+        rows: dict[int, dict] = {}   # timestamp -> row, so overlap cannot double-count
+        cursor = window_start
+
+        while cursor <= window_end:
+            page = self._get_ohlc(pair, period_seconds, cursor, OHLC_MAX_LIMIT)
+            if not page:
+                break
+
+            newest = cursor
+            for row in page:
+                ts = int(row["timestamp"])
+                newest = max(newest, ts)
+                if window_start <= ts <= window_end:
+                    rows[ts] = row
+
+            if len(page) < OHLC_MAX_LIMIT:
+                break                      # the server has nothing further
+            if newest <= cursor:
+                break                      # cursor stuck: stop rather than spin
+            cursor = newest + period_seconds
+
+        bars = [self._to_bar(rows[ts]) for ts in sorted(rows)]
+        if max_bars and len(bars) > max_bars:
+            bars = bars[-max_bars:]        # keep the most recent
+        return bars
+
+    @staticmethod
+    def _to_bar(row: dict) -> Bar:
+        """One raw row -> a Bar. Everything on the wire is a string."""
+        return Bar(
+            start=datetime.fromtimestamp(int(row["timestamp"]), tz=timezone.utc),
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            volume=float(row.get("volume") or 0.0),
+        )
 
     # ---------------------------------------------------------------- orders
 
