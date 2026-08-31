@@ -365,6 +365,36 @@ def _research_symbols() -> dict[str, SymbolConfig]:
             min_confidence=0.35,
             min_seconds_between_trades=900,
         ),
+        # ------------------------------------------- Sierra Chart spot gold
+        # Decoded from the .scid file Sierra Chart writes locally (see
+        # core/scid_reader.py). Spot XAU/USD, not the futures contract: same
+        # underlying, no central book, and the historical part of the file
+        # carries no quotes at all. It is here rather than beside MGC so a
+        # production run can never pick it up by accident.
+        "XAUUSD": SymbolConfig(
+            name="XAUUSD",
+            contract_size=1.0,       # one unit is one troy ounce
+            multiplier=1.0,          # $1.00 price move -> $1.00 per ounce
+            tick_size=0.01,
+            digits=2,
+            min_contracts=1,
+            step_contracts=1,
+            exchange="sierrachart",
+            base_asset="XAU",
+            quote_asset="USD",
+            enabled=True,
+            tradable=False,          # replay only; there is no order path
+            # Same underlying as MGC, so the distances carry over in price
+            # units even though the contract maths does not.
+            stop_distance=4.30,
+            target_distance=6.50,
+            # Wide on purpose. Before 2026-08-20 the file holds aggregated
+            # records with no quotes, so the spread there is 0 and this gate
+            # is not measuring anything.
+            max_spread=1.50,
+            min_confidence=0.35,
+            min_seconds_between_trades=900,
+        ),
     }
 
 

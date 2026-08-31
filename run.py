@@ -423,7 +423,9 @@ def command_status(settings=None) -> int:
 # ------------------------------------------------------------- collect mode
 
 
-def command_collect(settings, feed: str, source: Path, out: Path) -> int:
+def command_collect(
+    settings, feed: str, source: Path, out: Path, research: bool = False
+) -> int:
     """Run the ICT data collector as its own process.
 
     Separate from the engine on purpose: neither can crash the other. It has
@@ -438,8 +440,50 @@ def command_collect(settings, feed: str, source: Path, out: Path) -> int:
     from ict.service import CollectorService
 
     log = logging.getLogger("collect")
+
+    # The collector writes ict_{symbol}_{date}.csv - the exact glob the dry
+    # replay reads its input with. Sharing one directory therefore overwrites
+    # the source ticks mid-replay, and the run then re-reads its own feature
+    # rows as if they were quotes: every row closes a bar, bars_seen runs into
+    # the hundreds of thousands, and the day it clobbered is gone.
+    #
+    # The --out help text has warned about this since the flag was added. A
+    # warning in help text is not a guard; this is.
+    if feed == "dry" and out.resolve() == source.resolve():
+        log.error("--out and --source are the same directory: %s", out.resolve())
+        log.error(
+            "The collector writes ict_<SYMBOL>_<DATE>.csv, which is what the "
+            "dry replay globs for input. Sharing a directory makes the run "
+            "overwrite the ticks it is replaying and then read its own feature "
+            "rows back as quotes."
+        )
+        log.error("Re-run with a separate output, e.g.  --source data --out features")
+        return 2
+
+    # The collector appends. On a live feed that is what you want - a restart
+    # continues the day's file. On a dry replay it can only ever duplicate:
+    # the same input produces the same rows, so a second run into the same
+    # directory writes every row twice. The count doubles (looks like more
+    # data) while every mean and rate is unchanged (looks like a stable
+    # result), and the copies are indistinguishable from real samples once
+    # they reach training.
+    if feed == "dry":
+        existing = sorted(out.glob("ict_*.csv"))
+        if existing:
+            log.error(
+                "%s already holds %d ict_*.csv file(s), starting with %s",
+                out, len(existing), existing[0].name,
+            )
+            log.error(
+                "The collector appends, so replaying into a directory that "
+                "already has output duplicates every row. A dry replay is "
+                "deterministic - there is no version of this that adds "
+                "information."
+            )
+            log.error("Clear that directory, or pass a different --out.")
+            return 2
     service = CollectorService(
-        settings, directory=out, feed=feed, source=source
+        settings, directory=out, feed=feed, source=source, research=research
     )
     if not service.start():
         log.error("Collector did not start.")
@@ -727,6 +771,22 @@ def main() -> int:
              "pipeline without a Sierra Chart licence",
     )
     parser.add_argument(
+        "--research",
+        action="store_true",
+        help="use the research instrument set from config.py (XAUUSD, BTCUSD) "
+             "instead of the production CME contracts",
+    )
+    parser.add_argument(
+        "--asian-preset",
+        choices=["spec", "tokyo"],
+        default=None,
+        help="Asian accumulation window: 'spec' is 20:00-07:00 UTC as the "
+             "specification literally reads, 'tokyo' is 00:00-07:00 UTC, the "
+             "real Tokyo session. Both end at London open. This changes every "
+             "asian_* feature, so never mix presets within one dataset. "
+             "Omit to use whatever ict/sessions.py defaults to.",
+    )
+    parser.add_argument(
         "--source",
         type=Path,
         default=DATA_DIR,
@@ -738,8 +798,9 @@ def main() -> int:
         type=Path,
         default=DATA_DIR,
         help=f"collect: where feature CSVs are written (default {DATA_DIR.name}/). "
-             "Point it somewhere else when replaying, so the run does not "
-             "append to the files it is reading.",
+             "MUST differ from --source on the dry feed: output and input share "
+             "the ict_<SYMBOL>_<DATE>.csv naming, so one directory means the "
+             "replay overwrites the ticks it is reading. Enforced, not advisory.",
     )
     parser.add_argument("--arm", action="store_true", help="arm autotrade at startup")
     parser.add_argument(
@@ -751,6 +812,14 @@ def main() -> int:
     args = parser.parse_args()
 
     setup_logging(args.verbose)
+
+    # Imported lazily: run.py must stay importable without the private ict
+    # package, and `status` in particular has to work on a machine that only
+    # has the logs.
+    if args.asian_preset:
+        from ict.sessions import configure_asian
+
+        configure_asian(args.asian_preset)
 
     # `status` only reads logs/state.json, so it must work without any
     # connection - on a machine that has the logs but no Sierra Chart, say.
@@ -769,7 +838,9 @@ def main() -> int:
     if args.command == "selftest":
         return command_selftest(settings)
     if args.command == "collect":
-        return command_collect(settings, args.feed, args.source, args.out)
+        return command_collect(
+            settings, args.feed, args.source, args.out, args.research
+        )
     if args.command == "calibrate":
         return command_calibrate(settings)
     if args.command == "analyst-test":
