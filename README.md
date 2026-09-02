@@ -37,6 +37,13 @@ anything it produces is real.
 
 ## The result, stated plainly
 
+![The monitoring panel during a replay of real XAUUSD ticks](docs/panel.png)
+
+*Paper mode, observing. The strategy produced a BUY at 65% confidence with its
+reasons; the risk layer refused it. The veto chart is cumulative over the
+replay and says which gate stopped each evaluation — `daily_bias` first, on
+every single bar.*
+
 The pipeline runs end to end on real XAUUSD tick data — 4,898,251 ticks over
 six trading days, decoded from Sierra Chart's own `.scid` file, aggregated to
 bars, passed through the feature extractor, labelled, and evaluated with a
