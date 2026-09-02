@@ -1,321 +1,289 @@
-# CME futures trading engine (Sierra Chart / DTC)
+# cme-orderflow-engine
 
-> ### 📦 What is in this repository
+An intraday research engine for CME gold futures: a market-data layer, an
+order-flow feature extractor, and the measurement tooling that decides whether
+anything it produces is real.
+
+> ### What is in this repository
 >
 > This is the **infrastructure layer** of a live research project, published for
 > review. It is **not a runnable trading system**, and it is not open source —
 > see [LICENSE](LICENSE).
 >
-> **Included** — and each of these reads standalone:
->
 > | Module | What it is |
 > |---|---|
-> | [`core/dtc_client.py`](core/dtc_client.py) | Full DTC protocol interface spec for Sierra Chart — message types, data shapes, threading contract |
+> | [`core/scid_reader.py`](core/scid_reader.py) | Decoder for Sierra Chart's binary `.scid` intraday files |
+> | [`core/bitstamp_client.py`](core/bitstamp_client.py) | A second venue behind the same client interface, with book reconciliation |
+> | [`core/book_ids.py`](core/book_ids.py) | Price-keyed depth deltas translated to id-keyed quotes |
+> | [`core/dtc_client.py`](core/dtc_client.py) | Full DTC protocol interface spec — message types, data shapes, threading contract |
 > | [`core/symbols.py`](core/symbols.py) | Futures contract maths: multipliers, tick grids, whole-contract sizing |
 > | [`core/risk.py`](core/risk.py) | Risk manager and circuit breakers. Every gate can only refuse a trade |
 > | [`core/marketdata.py`](core/marketdata.py) | Tick → multi-timeframe bar aggregation, incremental L2 book |
 > | [`core/broker.py`](core/broker.py) | Pessimistic paper-fill simulator and the gated live-order path |
-> | [`core/engine.py`](core/engine.py) | The decision loop wiring it together |
-> | [`panel/`](panel/), [`deploy/`](deploy/) | Read-only monitoring dashboard, hardened systemd units |
+> | [`triple_barrier.py`](triple_barrier.py) etc. | The measurement tooling described below |
 >
-> **Withheld** — the `ict/` package: the ICT signal rules, the 36-feature
-> extractor and the LightGBM pipeline. That is the research, and it stays
-> private. Only `core/engine.py` and `run.py` import from it, so everything
-> above is unaffected and can be read on its own.
+> **Withheld** — the `ict/` package: the ICT signal rules, the feature
+> extractor and the LightGBM pipeline. Only `core/engine.py` and `run.py`
+> import from it, so everything above reads on its own.
 >
-> That separation is deliberate, not a convenience for publishing: the strategy
-> layer depends on nothing but floats and datetimes, which is what let the
-> entire data feed be swapped from cTrader to CME futures without touching a
-> line of it.
+> That separation is not a convenience for publishing. The strategy layer
+> depends on nothing but floats and datetimes, which is what let the data feed
+> be swapped from cTrader to Sierra Chart to Bitstamp without touching a line
+> of it. Three venues; zero changes above the client.
 
-> ## ⚠️ PLATFORM PIVOT — 2026-08-21
->
-> **The cTrader Open API is dead for this project.** The engine now targets
-> **CME futures via Sierra Chart over the DTC protocol** (localhost:11099), and
-> the traded instrument is **MGC (Micro Gold)** instead of spot XAUUSD.
->
-> The rest of this document describes the system as it is now. Where cTrader,
-> XAUUSD or lots still appear, they are labelled as history. What changed:
->
-> | Was | Is |
-> |---|---|
-> | cTrader Open API, Twisted, protobuf | raw `socket` + `struct` DTC client |
-> | `core/ctrader.py` | `core/ctrader_DEPRECATED.py` (reference only) |
-> | XAUUSD spot | MGC — 10 oz, $10 per $1.00 move, 0.10 tick |
-> | 0.01-lot fractional sizing | whole contracts, minimum 1 |
-> | `lot_size` / `lots` | `contract_size` / `contracts` |
->
-> **Not implemented yet:** `core/dtc_client.py` is an **interface blueprint** -
-> every signature the engine and collector call, documented, with no socket code
-> behind it. Filling in those bodies is the whole remaining job.
->
-> Until then both processes run on the **dry feed**, replaying recorded CSVs
-> offline through the identical callbacks the live client will fire:
->
-> ```
-> python run.py collect --feed dry --source data --out data   # 36-feature CSVs
-> python -m ict.prepare --symbol MGC                          # labels
-> python -m ict.train                                         # walk-forward
-> python run.py run --feed dry                                # engine replay
-> ```
->
-> `--feed dtc` is refused by both, by design - neither may silently fall back to
-> a broker. `calibrate` needs historical bars and is offline until the client
-> lands. No order can be sent in any mode.
->
-> **`ict/` is fully broker-decoupled.** It imports only stdlib, the ML stack,
-> and three platform-agnostic project modules (`config`, `core.marketdata`,
-> `core.symbols`). `ict/service.py` was ported off cTrader on 2026-08-21 and is
-> the last piece that ever touched a protocol.
->
-> **Funding reality:** one MGC contract at the configured 4.30 stop risks $43.
-> On a $500 account that is 8.6% per trade and there is nothing smaller to size
-> down to — so this is a paper-trading and data-collection configuration, not a
-> live one.
->
-> **Windows import-order trap:** `ict/train.py` must import LightGBM before
-> pandas or the first fit dies with an OpenMP access violation that looks like
-> corrupt data. The import is pinned at the top of that file with a comment -
-> do not "tidy" it into the alphabetical block.
->
-> `HANDOFF.md` has not been rewritten for the pivot and still describes the
-> cTrader deployment.
+47 Python files, ~11,800 lines, 46 tests.
 
-An automated intraday trading engine for CME futures: live prices and true
-exchange order-book depth over the DTC protocol from a local Sierra Chart
-server, ICT structure rules, an economic-calendar blackout filter, an optional
-Claude review layer, a hard risk manager, and a paper broker that simulates
-fills against the real feed.
+---
 
-The traded contract is **MGC** — CME Micro Gold, 10 oz, $10 per $1.00 move,
-$1.00 per tick. Positions are whole contracts; there is no fractional size.
+## The result, stated plainly
 
-**Read this first.** This is a complete, working trading system. It is not a
-profitable strategy, and nobody can hand you one. The weights in
-`core/strategy.py` are a reasonable starting point, not a measured edge — the
-only thing that tells you whether they work is weeks of paper trading with the
-journal this engine writes. Expect losing days; the risk manager exists to make
-sure a losing day stays a losing day rather than a blown account.
+The pipeline runs end to end on real XAUUSD tick data — 4,898,251 ticks over
+six trading days, decoded from Sierra Chart's own `.scid` file, aggregated to
+bars, passed through the feature extractor, labelled, and evaluated with a
+purged walk-forward split.
 
-A note on the target you started from: $10/day on $500 is 2% per day, roughly
-1,000× per year compounded. That is not a target any strategy sustains. Aiming
-for it forces oversized positions, which is the fastest known way to lose the
-$500. The defaults here risk $5 per trade with a $15 daily stop, and the honest
-expectation is a mix of green and red days that you judge over months.
+**It found no edge.** That is the finding, and it is reported here rather than
+buried, because how a system reaches "no" is the part worth reviewing.
+
+### Gold behaved like a coin
+
+Each bar was labelled by what the trade would actually have done: does the
+6.50 target get hit before the 4.30 stop, within four hours, with the spread
+paid on both crossings?
+
+| | value |
+|---|---|
+| observed win rate, long / short | 37.4% / 38.0% |
+| a fair coin at these distances, spread included | **37.0%** |
+| break-even win rate at 1.51 R:R | 39.8% |
+| taking every long / every short | PF 0.90 / 0.93, about one spread per trade |
+| the model, purged walk-forward | PF 0.96, 38.5% directional |
+
+The observed rate lands on the fair-coin rate. Over these six days, at this
+stop and target, gold was indistinguishable from a coin flip and the spread
+accounted for the entire gap to break-even. The model selected marginally
+better than trading everything and still lost money.
+
+`ict/train.py` refuses to certify a model below its bar and writes
+`has_edge=False` into the checkpoint, so a model that does not work cannot be
+mistaken for one that does.
+
+### A finding that did not survive
+
+A single-feature scan found one candidate that beat a permutation null taken
+over all features and buckets: shorting when the Asian range was narrow,
++1.02 per trade against a shuffled bar of +0.93.
+
+Broken down by day, one session carried 91% of it. Remove that Thursday and
+the effect is +0.14 — well inside noise.
+
+The permutation test rules out *luck of many features*. It cannot rule out
+*luck of one week*, and only the per-day decomposition shows that. Both checks
+are in this repository because the first one alone would have produced a
+confident, statistically supported, wrong claim.
+
+---
+
+## Getting real market data without paying for it
+
+The CME feed costs money this project does not have. Three routes were tried,
+and the constraints are as much network as budget:
+
+**Crypto venues.** Kraken, Binance, Coinbase and Bybit all time out during the
+TLS handshake from this network — filtering at the SNI level, not a blocked
+port. Bitstamp answers. `core/bitstamp_client.py` implements the same
+interface `core/dtc_client.py` declares, so everything above the client ran on
+live L2 depth without modification. Crypto microstructure is not CME's, so
+this validated the engineering and nothing about the edge.
+
+**Sierra Chart's own files.** The decisive one. Sierra Chart writes every tick
+it receives into a binary `.scid` file on disk — months of real XAUUSD data
+already sitting there, no subscription involved.
+[`core/scid_reader.py`](core/scid_reader.py) decodes it: 40-byte records where
+`Open == 0.0` marks `SINGLE_TRADE_WITH_BID_ASK` and `High` is the ask, `Low`
+the bid. Get that backwards and the book is inverted and every spread-derived
+feature with it, which is why the first test in the file is the one that
+checks it.
+
+Aggregated records in the downloaded portion carry no quotes at all. Bid and
+ask both fall back to the close there and the spread is exactly zero — a real
+limitation, documented in the module rather than left for a reader to assume.
+
+---
+
+## The measurement tooling
+
+Most of the work in this project turned out to be deciding what to believe.
+Each of these exists because something looked true and was not.
+
+**[`triple_barrier.py`](triple_barrier.py)** — labels a bar by the trade it
+describes, not by a price change. A long enters at the ask and exits at the
+bid, so the cost sits inside the label rather than beside it as a caveat. Long
+and short are computed separately, because after the spread they are not each
+other's negative: a bar can lose both ways, and on this instrument that is
+common. Ties are scored as losses; assuming the favourable order within a tick
+is how a backtest quietly inflates itself. 13 tests.
+
+**[`feature_separation.py`](feature_separation.py)** — scans one feature at a
+time against a permutation null taken over *all* features and buckets. Testing
+thirty features and reporting the best is not one test; the best of thirty
+noise columns looks impressive by construction. The null keeps every feature
+and every bucket edge and breaks only the link between a row and its outcome.
+
+**[`inspect_finding.py`](inspect_finding.py)** — decomposes a surviving
+finding by day. Two hundred bars drawn from two sessions is closer to two
+observations than to two hundred, and no statistic applied to the row count
+notices. This is the check that killed the only candidate here.
+
+**[`inspect_features.py`](inspect_features.py)** — flags constant columns and
+columns that correlate with row order. Six of the declared features are
+constant on this dataset: `box_type`, `daily_bias`, and the four
+`l2_imbalance_*`, which have nothing to compute from because a `.scid` file
+holds trades and top-of-book quotes, not depth. **Thirty live features, not
+thirty-six** — and those four dead columns are the concrete argument for why
+the paid feed matters.
+
+**[`inspect_labels.py`](inspect_labels.py)** — puts the label threshold next
+to the spread it has to beat, and sweeps the multiplier so choosing one is a
+decision with numbers under it.
+
+---
+
+## Bugs worth reading about
+
+Three of these were found by tooling in this repository, and all three would
+have produced a plausible, wrong result.
+
+**The collector overwrote its own input.** Output and replay input shared the
+`ict_<SYMBOL>_<DATE>.csv` naming, so pointing `--out` at `--source` made the
+run clobber the ticks it was reading and then parse its own feature rows back
+as quotes — 700,315 bars from a three-hour window. The `--out` help text had
+warned about this since the flag was added. A warning in help text is not a
+guard; `run.py` now refuses.
+
+**Three of ten session features flickered per tick.** The Asian
+sweep-and-return flags were cleared on every re-crossing of the range edge —
+exactly where the logic is meant to fire — so price oscillating around the
+level re-armed and re-confirmed the trap hundreds of times a session. A
+confirmed sweep-and-return is an event, not a state. The fix was deleting two
+lines.
+
+**The collector appends.** Correct for a live feed, where a restart continues
+the day's file. Never correct for a deterministic replay: a second run into
+the same directory writes every row twice, the count doubles — which reads as
+more data — and every mean and rate is unchanged, which reads as a stable
+result. Nothing looks wrong. Caught at 2,710 rows where the run wrote 1,355.
+
+---
 
 ## Layout
 
 ```
-run.py              entry point: check / selftest / run
-daily_report.py     end-of-day review of the journal
-config.py           settings, per-symbol parameters, secret masking
-panel/              read-only monitoring dashboard (separate process)
-  server.py         FastAPI: three GET routes, no mutating path exists
-  static/           self-contained HTML/CSS/JS, no external origins
-deploy/             hardened systemd units for engine and panel
+run.py              check / selftest / collect / status / run
+config.py           settings, per-symbol contract specs, secret masking
+triple_barrier.py   trade-outcome labels from raw ticks
+feature_separation.py   single-feature scan with a permutation null
+inspect_finding.py  per-day decomposition of a candidate finding
+inspect_features.py dead columns, calendar drift, label balance
+inspect_labels.py   label threshold against the spread it must beat
+compare_presets.py  compare two collector runs
+verify_book.py      order-book reconciliation against a REST snapshot
 core/
-  ctrader.py        Open API client - connect, auth, subscribe, order entry
-  symbols.py        symbol specs and the price/volume/money conversions
-  marketdata.py     ticks, bars, level-2 order book
+  scid_reader.py    Sierra Chart .scid  ->  replay tick CSVs
+  dtc_client.py     DTC protocol interface spec (no socket code yet)
+  bitstamp_client.py  Bitstamp adapter behind the same interface
+  book_ids.py       price-keyed depth deltas -> id-keyed quotes
+  symbols.py        contract specs, price/size/money conversions
+  marketdata.py     ticks, multi-timeframe bars, level-2 book
   indicators.py     EMA / RSI / ATR (pure functions)
   strategy.py       signal generation
-  news.py           ForexFactory calendar blackout
-  analyst.py        optional Claude review layer
   risk.py           position sizing and circuit breakers
-  broker.py         PaperBroker (simulated) and LiveBroker (real orders)
+  broker.py         PaperBroker (simulated) and LiveBroker (gated)
   journal.py        JSONL event log + CSV trade log
-  engine.py         wires it together, runs the decision loop
-logs/               engine log, events-*.jsonl, trades-*.csv
+  engine.py         the decision loop
+  analyst.py        optional Claude review layer (veto only)
+  news.py           economic-calendar blackout
+panel/              read-only monitoring dashboard (separate process)
+deploy/             hardened systemd units
+tests/              46 tests
 ```
 
-## Install
+## Install and run
 
 ```bash
 pip install -r requirements.txt
+python -m pytest -q                 # 46 tests, no network, no broker
+python run.py selftest              # full pipeline on synthetic data
 ```
 
-## First run
+Decode real ticks, replay them, label and evaluate:
 
 ```bash
-python run.py selftest
+python -m core.scid_reader --file "C:\SierraChart\Data\XAUUSD.scid" \
+                           --out data --start 2026-08-20 --end 2026-08-31
+python run.py collect --feed dry --research --source data --out features
+python triple_barrier.py --ticks data --features features --symbol XAUUSD
+python feature_separation.py data/triple_barrier.csv
 ```
 
-Offline. Replays synthetic ticks through the whole pipeline and asserts that
-position sizing respects the risk cap and that no simulated loss exceeds the
-stop. Touches no network and no account.
+`--out` may not equal `--source`, and neither may point at a directory that
+already holds output. Both are refused with an explanation, for the reasons in
+*Bugs worth reading about*.
 
-```bash
-python run.py check
-```
-
-Read-only, and offline. Prints the pinned contract specification for each
-enabled instrument, converts every stop into ticks and into dollars per
-contract, sizes it against your risk cap, then probes the Sierra Chart DTC
-port. It sends no orders. Run this before anything else — it tells you whether
-one contract already risks more than your per-trade cap, which on a futures
-account is the difference between trading and refusing every signal.
-
-```bash
-python run.py calibrate
-```
-
-Read-only. Measures ATR(14) on 5m/15m/1h from your broker's own bars and prints
-the stop and target those imply, the resulting position size, and whether your
-risk cap can afford the symbol at all. The shipped distances are estimates
-until you run this.
-
-```bash
-python run.py run           # observes and logs signals, never trades
-python run.py run --arm     # paper trading with simulated fills
-```
+`--feed dtc` is refused by design — neither process may silently fall back to
+a broker — and no order can be sent in any mode.
 
 ## The four gates before real money
 
-Live orders require **all** of:
+All four are required, and each can only refuse:
 
 1. `EXECUTION_MODE=live` in `.env`
-2. `--arm` on the command line
-3. `--i-understand-live` on the command line
-4. typing `LIVE` at the confirmation prompt
+2. `--arm`
+3. `--i-understand-live`
+4. the word `LIVE` typed at the prompt
 
-Miss any one and fills stay simulated. `AUTOTRADE_DEFAULT=true` only ever arms
-paper mode; live mode always starts disarmed regardless of `.env`.
-
-## Configuration
-
-Secrets live in `.env` (never commit it). Strategy and risk parameters live in
-`config.py` — they are code, not environment variables, because they are the
-part you will actually iterate on.
-
-| Setting | Default | What it does |
-|---|---|---|
-| `risk_per_trade` | 50.00 | Cash risked per trade. Size is derived from this and the stop, never chosen directly. **One MGC contract at the shipped 4.30 stop risks $43** — set this below that and every trade is refused, because there is nothing smaller than one contract to shrink into. |
-| `max_daily_loss` | 100.00 | Trading stops for the UTC day at this loss. |
-| `max_daily_profit` | 100.00 | Trading also stops after this gain — protecting a good day is a real edge. |
-| `max_daily_trades` | 6 | Overtrading cap. |
-| `max_consecutive_losses` | 2 | Two in a row triggers a 30-minute cooldown. |
-| `max_open_positions` | 1 | One position at a time across all contracts. |
-| `commission_per_contract` | 0.00 | **Set this from your broker's schedule** — MGC round turn is typically $1.00–$1.50 all-in. Leaving it at zero makes paper results look better than live ones ever will. |
-| `stop_distance` / `target_distance` | per symbol | In price units, sized for the 5-minute chart. 1:1.5 reward:risk. **Run `run.py calibrate` to replace these with measured values.** |
-| `max_spread` | per symbol | Hard veto. Check it against what `run.py check` reports. |
-| `min_confidence` | 0.35–0.40 | Signal strength floor. Raise to trade less. |
-
-`PAPER_START_BALANCE` in `.env` is currently 10000. Set it to the balance you
-actually intend to trade (e.g. 500) or the paper results will not reflect the
-position sizes and drawdowns you would really experience.
-
-## How a trade is decided
-
-Every gate can only *block*. Nothing in the chain can make the engine trade
-more than the strategy proposed.
-
-1. **Strategy — multi-timeframe.** The 1-hour and 15-minute EMA(9/21) trends
-   decide which direction is permitted at all; both must agree and both must
-   actually be trending (EMAs separated by at least 0.15 ATR), or nothing
-   trades. The 5-minute chart then decides timing: entry only on a pullback
-   toward the fast EMA, never on an extension. RSI is an exhaustion brake;
-   order-book imbalance and tick momentum are minor confirmation. Vetoes on
-   wide spread, on a target more than ~6 bars of 5m ATR away, and on any
-   5-minute trend that opposes the higher timeframes.
-2. **News blackout** — no trading from 30 minutes before to 15 minutes after a
-   high-impact release for the relevant currency.
-3. **Claude analyst** (optional) — a snapshot every 10 minutes; `avoid`/`wait`
-   or a confident opposing bias blocks the trade. Agreement changes nothing.
-4. **Risk manager** — sizes the position from the stop, then checks the daily
-   loss, daily profit, trade count, consecutive losses, cooldown, open-position
-   cap and per-symbol re-entry delay.
-5. **Broker** — paper by default; live only behind the four gates above.
-
-### Why Claude is not choosing entries
-
-An API round trip takes seconds. The setups here last minutes. By the time a
-reply arrives, the tick that prompted it is history — so Claude runs on a slow
-loop as a veto, never as a trigger. A language model's market opinion is not an
-edge; it is a reasonable check for "conditions look abnormal". To enable it,
-add `ANTHROPIC_API_KEY=...` to `.env`. Without it the engine runs unchanged.
-
-## Reading the output
-
-- `logs/engine-YYYYMMDD.log` — everything, including why each signal was
-  rejected. The rejection lines are the useful part.
-- `logs/events-YYYYMMDD.jsonl` — every signal, block and fill with full context.
-- `logs/trades-YYYYMMDD.csv` — closed trades: entry, exit, reason, P&L.
-
-After a couple of weeks the CSV answers the only questions that matter: win
-rate, average win vs average loss, and whether the losers cluster around
-particular hours or spread conditions.
-
-## Monitoring panel
-
-```bash
-python -m panel.server
-```
-
-A read-only dashboard on `http://127.0.0.1:8787`: balance and equity curve,
-the risk envelope as meters against each limit, live spread and signal state
-per instrument, the Claude analyst's current verdict, upcoming high-impact
-news, open positions, closed trades, and — most useful in week one — a ranked
-breakdown of *why the engine is not trading*.
-
-### Security model
-
-The panel is a **reader**, and that is enforced structurally rather than by
-convention:
-
-| Decision | Why |
-|---|---|
-| **No mutating routes exist.** The whole API is three GETs, and non-GET verbs are rejected in middleware. | Compromising the panel cannot place an order, because no code path places one. |
-| **Separate process.** It never imports the engine or touches the broker socket — it reads `logs/state.json`, which the engine publishes atomically via `os.replace`. | A hang, crash or request flood in the web layer cannot slow or kill the trading loop. |
-| **No credentials in the snapshot**, and every response is re-checked against the live `.env` values before it is served. | A future change that widens the snapshot fails loudly instead of leaking quietly. |
-| **Localhost by default.** A public bind requires `--i-understand-exposure` *and* a 24+ character `PANEL_TOKEN`. | Exposing an account dashboard to the internet cannot happen by accident. |
-| **Strict CSP** (`default-src 'none'`, no inline script or style), plus `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. | A string that reaches the page cannot become executable. |
-| **DOM built with `createElement`/`textContent`** — no `innerHTML` anywhere. | Engine-supplied strings are data, never markup. |
-| **Fixed static allowlist**; no filesystem path is ever built from user input. | Directory traversal is structurally impossible, not filtered. |
-
-View it remotely over an SSH tunnel rather than opening a port:
-
-```bash
-ssh -N -L 8787:127.0.0.1:8787 ubuntu@<vps-ip>
-```
-
-### Design notes
-
-Colour never carries meaning alone. The red/green profit pair fails colourblind
-separation — measured at ΔE 4.1 under deuteranopia against an ≥8 threshold — so
-every signed value also carries a sign, an arrow glyph and, in the trades table,
-the word "win" or "loss". Light and dark are separately chosen steps of the same
-palette, not an inverted flip. Charts use a single series (no categorical
-palette to get wrong), a 2px line, a 10% area wash, hairline gridlines, one
-direct label at the endpoint, and a hover crosshair with a tooltip; the equity
-curve has a table view for anyone who cannot use the chart.
+Miss any one and fills stay simulated. The DTC order path is not implemented,
+so `core/broker.py` refuses every order regardless.
 
 ## Known limitations
 
-- P&L assumes the contract settles in the account's deposit currency. True for
-  USD-denominated CME contracts on a USD account; the engine warns at startup
-  if you enable one where it does not hold.
-- Paper fills use the real bid/ask and charge spread and commission, but cannot
-  model slippage on a fast market or a stop gapping through a level. Live
-  results will be worse than paper. `PaperBroker` accepts `slippage_price` and
-  `stop_slippage_price` if you want to make it pessimistic deliberately.
-- Level-2 depth is now the exchange's own consolidated book rather than a
-  broker-constructed view, which is the whole reason for the CME migration.
-  Resting size still is not intent, so it stays weighted at 15 of 100 points.
-- The engine holds at most one position and does not trail stops, scale in or
-  hedge.
-- Reconnects re-subscribe, but a position opened live and closed while the
-  process was down will be seen only at the next `reconcile()`.
+- **`core/dtc_client.py` has no socket code.** It is an interface blueprint —
+  every signature the engine and collector call, documented and typed, with
+  empty bodies. Filling them in is the remaining job.
+- **Thirty live features, not thirty-six**, on data from a `.scid` file. The
+  four `l2_imbalance_*` columns need real depth.
+- **The label horizon and the trade design do not yet agree.** The 5-minute
+  label in `ict/prepare.py` asks a different question from a 4.30 stop and a
+  6.50 target; `triple_barrier.py` is the answer and is not yet the default.
+- **`MIN_DIRECTIONAL_ACCURACY` is a constant.** 0.52 was right for the old
+  symmetric label. At 1.51 R:R the break-even rate is 39.8%, so the gate
+  should derive from the target and stop rather than being pinned.
+- Paper fills charge spread and commission but cannot model slippage on a fast
+  market or a stop gapping through a level. Live will be worse than paper.
+- The engine holds at most one position and does not trail, scale in or hedge.
+- One MGC contract at the configured 4.30 stop risks $43. This is a
+  paper-trading and data-collection configuration, not a live one.
 
-## Suggested path
+## Design notes
 
-1. `selftest`, then `check`, and fix anything either one warns about.
-2. Run disarmed for a day. Read the log. Do the signals appear where you would
-   have taken them?
-3. Point Sierra Chart at a **simulated** trade account, keep
-   `EXECUTION_MODE=paper`, and run `--arm` for at least two weeks. Do not change
-   parameters mid-run; you need a clean sample.
-4. Review the CSV. If it is not profitable after commission in simulation, it
-   will not be profitable live. Change one thing, run another two weeks.
-5. Only then consider live — and only on an account that can absorb $43 of risk
-   per trade as 1–2% of capital, which means roughly $2,000–$4,000. Below that,
-   this is a data-collection tool, not a trading system.
+**Windows import order is load-bearing.** `ict/train.py` imports LightGBM
+before pandas. Both ship an OpenMP runtime, and whichever loads second binds
+against one already initialised; the first `LGBM_DatasetSetField` then dies
+with an access violation that looks exactly like corrupt training data.
+`KMP_DUPLICATE_LIB_OK` does not help.
+
+**The panel's colours.** Colour never carries meaning alone. The red/green
+profit pair fails colourblind separation — measured at ΔE 4.1 under
+deuteranopia against an ≥8 threshold — so every signed value also carries a
+sign, an arrow glyph and, in the trades table, the word "win" or "loss". Light
+and dark are separately chosen steps of the same palette, not an inverted
+flip.
+
+## What this is not
+
+This is a complete, working research system. It is not a profitable strategy,
+and nobody can hand you one. The measured result above is the honest state of
+it: a pipeline that works, evaluated correctly, reporting no edge on six days
+of data — which is the right answer for six days of data.
+
+The next thing that changes it is more of that data, not more model.
