@@ -153,9 +153,14 @@ def _in_thread(function, on_success=None, on_error=None, name: str = "work"):
 
 
 class TradingEngine:
-    def __init__(self, settings: Settings, feed: str = "dry") -> None:
+    def __init__(self, settings: Settings, feed: str = "dry",
+                 research: bool = False) -> None:
         self.settings = settings
         self.feed = feed
+        # Load the research instrument set instead of the production CME
+        # contracts. Which specs to use is the caller's decision, not the
+        # feed's - the same choice run.py already gives the collector.
+        self.research = research
         # TODO: Replace with DTC Client - this becomes
         #     DTCClient(host=settings.dtc_host, port=settings.dtc_port)
         # and `start()` below attaches the callbacks it fires. It stays None
@@ -252,9 +257,16 @@ class TradingEngine:
 
     def _bootstrap(self) -> None:
         settings = self.settings
-        wanted = [name for name, cfg in settings.symbols.items() if cfg.enabled]
+        # One pool, chosen once, used for every lookup below. Reading the
+        # flag in several places instead would let the registry and the
+        # strategies disagree about which contract they are configured for.
+        pool = settings.research_symbols if self.research else settings.symbols
+        wanted = [name for name, cfg in pool.items() if cfg.enabled]
         if not wanted:
-            raise SystemExit("No contracts enabled in config.py")
+            raise SystemExit(
+                "No contracts enabled in config.py"
+                + (" research_symbols" if self.research else " symbols")
+            )
 
         # Contract specifications come from config.py now, not from a broker
         # symbol download. The ids are local and only have to be stable within
@@ -262,7 +274,7 @@ class TradingEngine:
         # uses on the wire.
         registry = self.registry
         for index, name in enumerate(wanted, start=1):
-            registry.add(settings.symbols[name].to_spec(symbol_id=index))
+            registry.add(pool[name].to_spec(symbol_id=index))
         registry.deposit_asset = "USD"
 
         log.info(
@@ -283,7 +295,7 @@ class TradingEngine:
             if spec is None:
                 continue
             self.market.register(spec)
-            self.strategies[spec.name] = Strategy(settings.symbols[name])
+            self.strategies[spec.name] = Strategy(pool[name])
             if self.ict_mode:
                 self.ict_extractors[spec.name] = ICTFeatureExtractor(
                     spec.name, tick_size=10.0 ** (-spec.digits),
@@ -300,7 +312,7 @@ class TradingEngine:
                 f"tick {spec.tick_size:g} = {spec.tick_value:g} {spec.quote_asset}",
                 settings.symbols[name].stop_distance,
                 spec.risk_for_volume(
-                    spec.min_contracts, settings.symbols[name].stop_distance
+                    spec.min_contracts, pool[name].stop_distance
                 ),
                 spec.min_contracts,
             )

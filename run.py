@@ -673,7 +673,8 @@ def command_analyst_test(settings) -> int:
 # ------------------------------------------------------------------- run mode
 
 
-def command_run(settings, arm: bool, understand_live: bool, feed: str) -> int:
+def command_run(settings, arm: bool, understand_live: bool, feed: str,
+                research: bool = False) -> int:
     """Start the engine.
 
     No reactor any more - the Twisted event loop left with the cTrader SDK.
@@ -685,7 +686,7 @@ def command_run(settings, arm: bool, understand_live: bool, feed: str) -> int:
     from core.engine import TradingEngine
 
     log = logging.getLogger("run")
-    engine = TradingEngine(settings, feed=feed)
+    engine = TradingEngine(settings, feed=feed, research=research)
 
     if settings.live_execution:
         # Kept as the outer gate even though the order path is offline: the day
@@ -845,7 +846,9 @@ def main() -> int:
         return command_calibrate(settings)
     if args.command == "analyst-test":
         return command_analyst_test(settings)
-    return command_run(settings, args.arm, args.i_understand_live, args.feed)
+    return command_run(
+        settings, args.arm, args.i_understand_live, args.feed, args.research
+    )
 
 
 if __name__ == "__main__":

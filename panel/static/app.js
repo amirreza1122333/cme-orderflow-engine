@@ -395,7 +395,7 @@ function renderSymbols(state) {
     return el('div', { class: 'symbol' }, [
       el('div', {}, [
         el('div', { class: 'symbol-name', text: symbol.name }),
-        el('div', { class: 'muted', text: `${symbol.bars} bars` }),
+        el('div', { class: 'muted', text: barsText(symbol.bars) }),
       ]),
       el('div', {}, [
         el('div', { class: 'symbol-price',
@@ -419,6 +419,19 @@ function renderSymbols(state) {
   });
   replace($('symbols'), ...(rows.length ? rows
     : [el('p', { class: 'empty', text: 'No instruments active.' })]));
+}
+
+/* The engine reports a bar count PER TIMEFRAME, because warm-up is per
+ * timeframe: the slowest one decides when the strategy may evaluate at all,
+ * and "which timeframe is not warm yet" is the question you actually have
+ * when nothing is trading. Interpolating that object straight into a template
+ * rendered the literal text "[object Object] bars", which is what this fixes.
+ * A plain number is still accepted, so an older snapshot keeps working. */
+function barsText(bars) {
+  if (bars === null || bars === undefined) return 'no bars';
+  if (typeof bars === 'number') return `${bars} bars`;
+  const parts = Object.entries(bars).map(([tf, n]) => `${tf} ${n}`);
+  return parts.length ? parts.join(' \u00b7 ') : 'no bars';
 }
 
 /* ------------------------------------------------------------ veto chart
