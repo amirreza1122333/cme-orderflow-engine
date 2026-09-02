@@ -357,7 +357,12 @@ def _research_symbols() -> dict[str, SymbolConfig]:
             base_asset="BTC",
             quote_asset="USD",
             # Placeholders - see the docstring:
-            enabled=True,
+            # Disabled 2026-09-02. Bitstamp did its job - it proved the client
+            # interface held across a third venue - but the research data is
+            # XAUUSD from the .scid replay now, and there are no BTCUSD files
+            # to read. Left enabled it only produced "nothing to replay"
+            # warnings on every run and an empty row on the panel.
+            enabled=False,
             tradable=False,          # no order path exists on this adapter
             stop_distance=150.0,
             target_distance=225.0,

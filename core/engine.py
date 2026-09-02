@@ -221,6 +221,18 @@ class TradingEngine:
 
     # -------------------------------------------------------------- lifecycle
 
+    def config_for(self, name: str):
+        """The contract config for a symbol, from whichever pool this run uses.
+
+        Every lookup goes through here. Reading `settings.symbols` directly at
+        a call site is how a research run ends up asking the production dict
+        for a symbol it has never heard of - a KeyError if the site indexes,
+        and a silent None if it uses .get(), which is worse.
+        """
+        pool = (self.settings.research_symbols if self.research
+                else self.settings.symbols)
+        return pool.get(name)
+
     def start(self) -> bool:
         """Bring the engine up. Returns True when it is running.
 
@@ -310,7 +322,7 @@ class TradingEngine:
                 "%s | %s | stop %g -> %.2f risk per contract, min %d contract(s)",
                 spec.describe(),
                 f"tick {spec.tick_size:g} = {spec.tick_value:g} {spec.quote_asset}",
-                settings.symbols[name].stop_distance,
+                pool[name].stop_distance,
                 spec.risk_for_volume(
                     spec.min_contracts, pool[name].stop_distance
                 ),
@@ -747,7 +759,7 @@ class TradingEngine:
             self._note_block(symbol, "blocked_analyst", veto, now)
             return
 
-        config = self.settings.symbols.get(symbol)
+        config = self.config_for(symbol)
         if config is None:
             return
         decision = self.risk.can_trade(
@@ -882,7 +894,7 @@ class TradingEngine:
         # Data-only symbols: everything above this line has already run, so the
         # feature vector, the veto counters and this "would have traded" record
         # all keep feeding the ML training set. Only the position is withheld.
-        sym_cfg = self.settings.symbols.get(symbol)
+        sym_cfg = self.config_for(symbol)
         if sym_cfg is not None and not sym_cfg.tradable:
             log.info("[data-only] %s would have taken %s",
                      symbol, signal.describe())
@@ -1068,7 +1080,7 @@ class TradingEngine:
             if state is None:
                 continue
             spec = state.spec
-            config = settings.symbols.get(name)
+            config = self.config_for(name)
             tick = state.last_tick
             signal = (
                 self.strategies[name].evaluate(state)
