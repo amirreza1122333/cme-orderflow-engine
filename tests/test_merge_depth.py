@@ -51,13 +51,15 @@ def test_a_full_match_fills_the_dead_features(tmp_path, capsys):
     f, d = tmp_path / "f.csv", tmp_path / "d.csv"
     _features(f, STAMPS)
     _depth(d, STAMPS)
-    assert main(["--features", str(f), "--depth", str(d)]) == 0
+    out = tmp_path / "merged"
+    assert main(["--features", str(f), "--depth", str(d),
+                 "--out", str(out)]) == 0
     assert "(100.0%)" in capsys.readouterr().out
 
-    out = list(csv.DictReader((tmp_path / "f_depth.csv").open(),
-                              skipinitialspace=True))
+    parsed = list(csv.DictReader((out / "f.csv").open(),
+                                 skipinitialspace=True))
     # The header comment line is skipped by DictReader? No - check explicitly.
-    rows = [r for r in out if r.get("timestamp")]
+    rows = [r for r in parsed if r.get("timestamp")]
     assert all(r["l2_imbalance_5"] == "0.25" for r in rows)
 
 
@@ -66,10 +68,11 @@ def test_a_misaligned_clock_fails_instead_of_writing_empty_columns(tmp_path):
     _features(f, STAMPS)
     _depth(d, ["2026-08-26T17:00:00", "2026-08-26T17:05:00",
                "2026-08-26T17:10:00", "2026-08-26T17:15:00"])
+    out = tmp_path / "merged"
     with pytest.raises(SystemExit) as caught:
-        main(["--features", str(f), "--depth", str(d)])
+        main(["--features", str(f), "--depth", str(d), "--out", str(out)])
     assert "below --min-match" in str(caught.value)
-    assert not (tmp_path / "f_depth.csv").exists()
+    assert not (out / "f.csv").exists()
 
 
 def test_a_partial_match_is_allowed_but_reported(tmp_path, capsys):
@@ -86,8 +89,9 @@ def test_rows_without_depth_keep_their_original_values(tmp_path):
     f, d = tmp_path / "f.csv", tmp_path / "d.csv"
     _features(f, STAMPS)
     _depth(d, STAMPS[:3])
-    main(["--features", str(f), "--depth", str(d)])
-    rows = [r for r in csv.DictReader((tmp_path / "f_depth.csv").open())
+    out = tmp_path / "merged"
+    main(["--features", str(f), "--depth", str(d), "--out", str(out)])
+    rows = [r for r in csv.DictReader((out / "f.csv").open())
             if r.get("timestamp")]
     assert rows[-1]["l2_imbalance_5"] == "0.0"
     assert rows[-1]["l2_levels"] == ""
@@ -110,9 +114,10 @@ def test_the_csv_is_readable_by_a_plain_csv_reader(tmp_path):
     f, d = tmp_path / "f.csv", tmp_path / "d.csv"
     _features(f, STAMPS)
     _depth(d, STAMPS)
-    main(["--features", str(f), "--depth", str(d)])
+    out = tmp_path / "merged"
+    main(["--features", str(f), "--depth", str(d), "--out", str(out)])
 
-    rows = list(csv.DictReader((tmp_path / "f_depth.csv").open()))
+    rows = list(csv.DictReader((out / "f.csv").open()))
     assert len(rows) == len(STAMPS)
     assert set(rows[0]) >= {"timestamp", "mid", "l2_imbalance_5", "l2_levels"}
 
@@ -122,9 +127,10 @@ def test_the_cross_instrument_warning_is_recorded_in_the_sidecar(tmp_path):
     f, d = tmp_path / "f.csv", tmp_path / "d.csv"
     _features(f, STAMPS)
     _depth(d, STAMPS)
-    main(["--features", str(f), "--depth", str(d)])
+    out = tmp_path / "merged"
+    main(["--features", str(f), "--depth", str(d), "--out", str(out)])
 
-    meta = json.loads((tmp_path / "f_depth.meta.json").read_text())
+    meta = json.loads((out / "f.depth.json").read_text())
     assert "CROSS-INSTRUMENT" in meta["warning"]
     assert meta["match_share"] == 1.0
     assert meta["columns_filled"] == ["l2_imbalance_5", "l2_imbalance_3"]
@@ -257,8 +263,9 @@ def test_a_directory_merges_every_day_in_it(tmp_path, capsys):
     assert "2 feature files" in report
     assert "wrote 2 of 2 merged files" in report
     for date in days:
-        assert (folder / f"ict_XAUUSD_{date}_depth.csv").exists()
-        assert (folder / f"ict_XAUUSD_{date}_depth.meta.json").exists()
+        out = tmp_path / "features_depth"
+        assert (out / f"ict_XAUUSD_{date}.csv").exists()
+        assert (out / f"ict_XAUUSD_{date}.depth.json").exists()
 
 
 def test_a_day_with_no_depth_is_skipped_and_named(tmp_path, capsys):
@@ -275,7 +282,7 @@ def test_a_day_with_no_depth_is_skipped_and_named(tmp_path, capsys):
     report = capsys.readouterr().out
     assert "wrote 1 of 2 merged files" in report
     assert "ict_XAUUSD_20260829.csv" in report.split("SKIPPED")[1]
-    assert not (folder / "ict_XAUUSD_20260829_depth.csv").exists()
+    assert not (tmp_path / "features_depth" / "ict_XAUUSD_20260829.csv").exists()
 
 
 def test_already_merged_files_are_not_merged_again(tmp_path, capsys):
@@ -315,3 +322,68 @@ def test_several_depth_files_are_pooled(tmp_path, capsys):
     assert main(["--features", str(folder),
                  "--depth", str(d1), str(d2)]) == 0
     assert "wrote 2 of 2 merged files" in capsys.readouterr().out
+
+
+# ------------------------------------ output must not land beside the input
+
+def test_merged_files_go_to_a_separate_directory(tmp_path):
+    """`ict/prepare.py` globs `ict_{symbol}_*.csv`.
+
+    Writing the merged file into the same folder makes that glob return both
+    the original and the merge, so every row is read twice - and the manifest
+    glob picks the wrong file, because `_depth.meta.json` sorts last. This is
+    the collector's original self-overwrite bug in a new place.
+    """
+    folder = tmp_path / "features"
+    _day(folder, "20260826", LONG)
+    _day(folder, "20260827", [s.replace("08-26", "08-27") for s in LONG])
+    d = tmp_path / "d.csv"
+    _depth_priced(d, LONG + [s.replace("08-26", "08-27") for s in LONG],
+                  [4710.3] * (2 * len(LONG)))
+
+    main(["--features", str(folder), "--depth", str(d)])
+
+    from merge_depth import out_dir_for
+    out = out_dir_for(folder, None)
+    assert out != folder
+    # The input folder is untouched: still exactly the two files it started with.
+    assert sorted(p.name for p in folder.glob("*.csv")) == [
+        "ict_XAUUSD_20260826.csv", "ict_XAUUSD_20260827.csv"]
+    assert sorted(p.name for p in out.glob("*.csv")) == [
+        "ict_XAUUSD_20260826.csv", "ict_XAUUSD_20260827.csv"]
+
+
+def test_the_collectors_manifest_is_carried_across(tmp_path):
+    """prepare.py reads label_horizon_s from it. A folder of rows without the
+    manifest is not a dataset."""
+    import json
+    folder = tmp_path / "features"
+    _day(folder, "20260826", LONG)
+    _day(folder, "20260827", [s.replace("08-26", "08-27") for s in LONG])
+    (folder / "ict_XAUUSD_20260826.meta.json").write_text(
+        json.dumps({"symbol": "XAUUSD", "label_horizon_s": 300}))
+    d = tmp_path / "d.csv"
+    _depth_priced(d, LONG + [s.replace("08-26", "08-27") for s in LONG],
+                  [4710.3] * (2 * len(LONG)))
+
+    main(["--features", str(folder), "--depth", str(d)])
+    out = tmp_path / "features_depth"
+    carried = json.loads((out / "ict_XAUUSD_20260826.meta.json").read_text())
+    assert carried["label_horizon_s"] == 300
+
+
+def test_our_provenance_does_not_collide_with_the_collectors_manifest(tmp_path):
+    """`.depth.json`, not `.meta.json` - the second is a namespace prepare.py
+    globs, and putting our file in it means prepare reads ours instead."""
+    folder = tmp_path / "features"
+    _day(folder, "20260826", LONG)
+    _day(folder, "20260827", [s.replace("08-26", "08-27") for s in LONG])
+    d = tmp_path / "d.csv"
+    _depth_priced(d, LONG + [s.replace("08-26", "08-27") for s in LONG],
+                  [4710.3] * (2 * len(LONG)))
+
+    main(["--features", str(folder), "--depth", str(d)])
+    out = tmp_path / "features_depth"
+    assert (out / "ict_XAUUSD_20260826.depth.json").exists()
+    # No manifest was in the source, so none should have appeared here.
+    assert not list(out.glob("*.meta.json"))

@@ -154,14 +154,51 @@ def _merge_one(features: list[dict], by_time: dict):
     return merged, matched, basis
 
 
+def out_dir_for(features: Path, explicit: Path | None) -> Path:
+    """Where merged files go: never beside the files they were made from.
+
+    `ict/prepare.py` finds its inputs with `glob("ict_{symbol}_*.csv")`, and
+    that pattern matches `ict_XAUUSD_20260821_depth.csv` exactly as happily as
+    the original. Writing the output into the input folder makes prepare read
+    every row twice - and pick the wrong manifest, because `_depth.meta.json`
+    sorts after `.meta.json` and it takes the last one.
+
+    This is the first bug this project ever had, rebuilt: the collector used
+    to overwrite its own replay input because output and input shared a
+    naming pattern. A separate directory is the only fix that does not depend
+    on everyone downstream remembering the exception.
+    """
+    if explicit is not None:
+        return explicit
+    base = features if features.is_dir() else features.parent
+    return base.with_name(base.name + "_depth")
+
+
 def _write(merged: list[dict], source: Path, args, matched: int,
            share: float, basis: list[float]) -> Path:
-    out_path = source.with_name(source.stem + "_depth.csv")
+    out_dir = out_dir_for(args.features, args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # The SAME filename as the source. Downstream globs for the collector's
+    # names, so the merged set has to look like a collector output folder -
+    # which is what it is, with four columns filled in.
+    out_path = out_dir / source.name
     with out_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(merged[0]))
         writer.writeheader()
         writer.writerows(merged)
-    out_path.with_suffix(".meta.json").write_text(json.dumps({
+
+    # The collector's manifest travels with the data. prepare.py reads
+    # label_horizon_s from it, and a folder of rows without it is not a
+    # dataset, it is a spreadsheet.
+    manifest = source.with_suffix(".meta.json")
+    if manifest.exists():
+        (out_dir / manifest.name).write_text(
+            manifest.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Our provenance goes under .depth.json, NOT .meta.json - the second one
+    # is the collector's namespace and prepare.py globs it.
+    (out_dir / (source.stem + ".depth.json")).write_text(json.dumps({
         "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "features_from": str(source),
         "depth_from": [str(p) for p in args.depth],
@@ -191,7 +228,9 @@ def main(argv: list[str]) -> int:
                         help="one or more depth CSVs; they are pooled, so a "
                              "multi-day file and a single-day one can be "
                              "given together")
-    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--out", type=Path, default=None,
+                        help="directory for the merged files. Default: a "
+                             "sibling of --features with '_depth' appended.")
     parser.add_argument("--min-match", type=float, default=0.5,
                         help="fail below this share of feature rows matched")
     args = parser.parse_args(argv)
@@ -258,39 +297,9 @@ def main(argv: list[str]) -> int:
             f"because it trains."
         )
 
-    out_path = args.out or args.features.with_name(
-        args.features.stem + "_depth.csv")
-    with out_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(merged[0]))
-        writer.writeheader()
-        writer.writerows(merged)
-
-    # The provenance goes in a sidecar, not in the CSV. The first version
-    # wrote it as a leading `#` comment - which csv.DictReader reads as the
-    # header, so every column name became a fragment of that sentence and
-    # every downstream reader broke. A note that damages the file it
-    # annotates is not documentation. The collector already writes
-    # .meta.json beside each CSV; this follows it.
-    meta_path = out_path.with_suffix(".meta.json")
-    meta_path.write_text(json.dumps({
-        "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "features_from": str(args.features),
-        "depth_from": str(args.depth),
-        "rows": len(merged),
-        "matched": matched,
-        "match_share": round(share, 4),
-        "warning": (
-            "CROSS-INSTRUMENT: the l2_* columns are GC (COMEX gold futures); "
-            "every other column is XAUUSD. Gold's price discovery happens in "
-            "the futures book, so the imbalance is plausibly informative "
-            "about spot - but a model trained on this is being told about a "
-            "market it does not trade."
-        ),
-        "columns_filled": list(FILLED),
-        "columns_added": list(CARRIED),
-    }, indent=2), encoding="utf-8")
+    out_path = _write(merged, args.features, args, matched, share, basis)
     print(f"\nwrote {out_path}")
-    print(f"      {meta_path.name}  (provenance, including the "
+    print(f"      {out_path.stem}.depth.json  (provenance, including the "
           f"cross-instrument warning)")
 
     live = [r for r in merged if r.get("l2_levels") not in ("", None, "0")]
