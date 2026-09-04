@@ -149,30 +149,52 @@ def _depth_priced(path, stamps, books):
                         "l2_imbalance_3", "bid_px_0", "ask_px_0"])
 
 
+LONG = [f"2026-08-26T{h:02d}:{m:02d}:00" for h in range(4) for m in
+        (0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)]
+
+
 def test_a_steady_basis_is_reported_as_sound(tmp_path, capsys):
+    spots = [4654.8 + (i % 5) * 0.2 for i in range(len(LONG))]
+    books = [s + 55.5 + (i % 3) * 0.3 for i, s in enumerate(spots)]
     f, d = tmp_path / "f.csv", tmp_path / "d.csv"
-    _with_prices(f, STAMPS, [4654.8, 4655.2, 4653.9, 4656.1])
-    _depth_priced(d, STAMPS, [4711.9, 4712.4, 4711.0, 4713.2])
+    _with_prices(f, LONG, spots)
+    _depth_priced(d, LONG, books)
     main(["--features", str(f), "--depth", str(d)])
     report = capsys.readouterr().out
     assert "basis (GC - spot)" in report
-    assert "the two feeds agree" in report
+    assert "the join is sound" in report
 
 
 def test_a_wandering_basis_is_called_out(tmp_path, capsys):
-    """The failure this exists to catch: a clock offset shows up as a basis
-    that moves tens of points inside one session."""
+    """A clock offset moves the BULK of the bars, not a couple of them."""
+    spots = [4654.8] * len(LONG)
+    books = [4654.8 + 40 + i for i in range(len(LONG))]   # basis drifts 48 pts
     f, d = tmp_path / "f.csv", tmp_path / "d.csv"
-    _with_prices(f, STAMPS, [4654.8, 4655.2, 4653.9, 4656.1])
-    _depth_priced(d, STAMPS, [4711.9, 4740.0, 4690.0, 4760.0])
+    _with_prices(f, LONG, spots)
+    _depth_priced(d, LONG, books)
+    main(["--features", str(f), "--depth", str(d)])
+    assert "suspect a clock offset" in capsys.readouterr().out
+
+
+def test_a_few_far_out_bars_are_told_apart_from_a_drift(tmp_path, capsys):
+    """The distinction min/max cannot make, and the reason for reporting the
+    middle half: a tight bulk with two outliers is not a broken feed."""
+    spots = [4654.8] * len(LONG)
+    books = [4654.8 + 55.5 for _ in LONG]
+    books[3] += 30
+    books[-2] -= 30
+    f, d = tmp_path / "f.csv", tmp_path / "d.csv"
+    _with_prices(f, LONG, spots)
+    _depth_priced(d, LONG, books)
     main(["--features", str(f), "--depth", str(d)])
     report = capsys.readouterr().out
-    assert "Suspect a clock offset" in report
+    assert "a few bars are far" in report
+    assert "not a blocker" in report
 
 
 def test_no_price_columns_means_no_basis_line(tmp_path, capsys):
     f, d = tmp_path / "f.csv", tmp_path / "d.csv"
-    _features(f, STAMPS)
-    _depth(d, STAMPS)
+    _features(f, LONG)
+    _depth(d, LONG)
     main(["--features", str(f), "--depth", str(d)])
     assert "basis" not in capsys.readouterr().out

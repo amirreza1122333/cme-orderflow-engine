@@ -211,23 +211,40 @@ def _report_basis(pairs: list[float]) -> None:
     mysteriously carries no signal, weeks later, with nothing pointing at the
     cause.
     """
-    if len(pairs) < 2:
+    if len(pairs) < 8:
         return
 
-    low, high = min(pairs), max(pairs)
-    mean = sum(pairs) / len(pairs)
-    print(f"\n{'basis (GC - spot)':18}{mean:>8.2f} mean, "
-          f"{low:.2f} to {high:.2f} over {len(pairs):,} bars")
-    spread = high - low
-    if spread > 20:
-        print(f"  It moves {spread:.1f} points across one session. Gold's "
-              f"basis is a carry cost and should be nearly flat over a day.")
-        print("  Suspect a clock offset or a decoder before trusting any "
-              "feature built on this.")
+    ordered = sorted(pairs)
+
+    def at(share: float) -> float:
+        return ordered[min(int(share * len(ordered)), len(ordered) - 1)]
+
+    median = at(0.5)
+    iqr = at(0.75) - at(0.25)
+    tails = at(0.95) - at(0.05)
+    print(f"\n{'basis (GC - spot)':18}{median:>8.2f} median over "
+          f"{len(pairs):,} bars")
+    print(f"{'  middle half':18}{iqr:>8.2f} points wide")
+    print(f"{'  5th to 95th':18}{tails:>8.2f} points wide")
+    print(f"{'  full range':18}{ordered[-1] - ordered[0]:>8.2f} points")
+
+    # The judgement is made on the middle half, not the range. min and max
+    # are a two-observation statistic: they describe the two most extreme
+    # bars and say nothing about the other 274. A handful of bars where the
+    # two feeds were sampled a few seconds apart in a fast market will stretch
+    # the range without meaning anything, and the same number would be alarming
+    # if every bar contributed to it. Deciding on the range is how a finding
+    # that lives in one Thursday gets called an edge.
+    if iqr > 10:
+        print("  The middle half of the bars spans more than ten points. "
+              "That is the bulk of the data moving,")
+        print("  not a few odd bars - suspect a clock offset or a decoder "
+              "before building features on this.")
+    elif ordered[-1] - ordered[0] > 3 * max(iqr, 0.01):
+        print("  The bulk is tight and the range is not: a few bars are far "
+              "out. Most likely the two feeds")
+        print("  were sampled seconds apart while gold was moving. Worth a "
+              "look, not a blocker.")
     else:
-        print(f"  Steady within {spread:.1f} points - the two feeds agree "
-              f"about gold, so the join is sound.")
-
-
-if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+        print("  Tight through the bulk and the tails - the two feeds agree "
+              "about gold and the join is sound.")
