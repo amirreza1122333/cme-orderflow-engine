@@ -217,7 +217,29 @@ def main(argv: list[str]) -> int:
         )
 
     print(f"\ndownloading to {target} ...")
-    data = client.timeseries.get_range(**query)
+    try:
+        data = client.timeseries.get_range(**query)
+    except Exception as error:
+        # Databento answers a blocked request with 402
+        # `account_insufficient_funds`, which reads as "your credit ran out"
+        # and sends you to check a balance that is fine. The usual cause is
+        # the monthly usage limit on the billing page - a cap you set
+        # yourself, separate from the credit. The tell is a SMALLER request
+        # failing after a larger one succeeded: a balance cannot do that, a
+        # cap can.
+        if "insufficient_funds" in str(error) or "402" in str(error):
+            raise SystemExit(
+                f"\nDatabento refused the request: {error}\n\n"
+                f"This is usually the monthly usage limit, not the credit "
+                f"balance. They are separate:\n"
+                f"  credit    - the $125 that came with the account\n"
+                f"  usage cap - a ceiling you set, at portal > Billing > "
+                f"Usage-based access > Manage\n"
+                f"Check the cap first, especially if a smaller request just "
+                f"failed after a bigger one succeeded.\nEstimated cost of "
+                f"this request was ${cost:,.4f}; nothing was charged."
+            )
+        raise
     data.to_file(target)
     print(f"wrote {target} ({human(target.stat().st_size)} on disk, "
           f"compressed)")

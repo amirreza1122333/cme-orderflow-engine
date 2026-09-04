@@ -230,3 +230,88 @@ def test_the_module_actually_runs_as_a_script(tmp_path):
     assert "matched" in done.stdout, (
         f"the script produced no report. stdout={done.stdout!r}"
     )
+
+
+# ------------------------------------------------- a whole folder in one run
+
+def _day(folder, date, stamps, spot=4654.8):
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"ict_XAUUSD_{date}.csv"
+    _with_prices(path, stamps, [spot] * len(stamps))
+    return path
+
+
+def test_a_directory_merges_every_day_in_it(tmp_path, capsys):
+    folder = tmp_path / "features"
+    days = {"20260826": LONG,
+            "20260827": [s.replace("08-26", "08-27") for s in LONG]}
+    for date, stamps in days.items():
+        _day(folder, date, stamps)
+
+    d = tmp_path / "d.csv"
+    _depth_priced(d, LONG + [s.replace("08-26", "08-27") for s in LONG],
+                  [4710.3] * (2 * len(LONG)))
+
+    assert main(["--features", str(folder), "--depth", str(d)]) == 0
+    report = capsys.readouterr().out
+    assert "2 feature files" in report
+    assert "wrote 2 of 2 merged files" in report
+    for date in days:
+        assert (folder / f"ict_XAUUSD_{date}_depth.csv").exists()
+        assert (folder / f"ict_XAUUSD_{date}_depth.meta.json").exists()
+
+
+def test_a_day_with_no_depth_is_skipped_and_named(tmp_path, capsys):
+    """The failure worth catching: one day quietly merged to empty columns
+    is a gap in the training set that nothing else will point at."""
+    folder = tmp_path / "features"
+    _day(folder, "20260826", LONG)
+    _day(folder, "20260829", [s.replace("08-26", "08-29") for s in LONG])
+
+    d = tmp_path / "d.csv"
+    _depth_priced(d, LONG, [4710.3] * len(LONG))
+
+    assert main(["--features", str(folder), "--depth", str(d)]) == 0
+    report = capsys.readouterr().out
+    assert "wrote 1 of 2 merged files" in report
+    assert "ict_XAUUSD_20260829.csv" in report.split("SKIPPED")[1]
+    assert not (folder / "ict_XAUUSD_20260829_depth.csv").exists()
+
+
+def test_already_merged_files_are_not_merged_again(tmp_path, capsys):
+    """Rerunning must not treat last run's output as this run's input.
+
+    Two days, not one: a single feature file takes the single-file path and
+    would not exercise the directory scan at all.
+    """
+    folder = tmp_path / "features"
+    _day(folder, "20260826", LONG)
+    _day(folder, "20260827", [s.replace("08-26", "08-27") for s in LONG])
+    d = tmp_path / "d.csv"
+    _depth_priced(d, LONG + [s.replace("08-26", "08-27") for s in LONG],
+                  [4710.3] * (2 * len(LONG)))
+
+    main(["--features", str(folder), "--depth", str(d)])
+    capsys.readouterr()
+
+    main(["--features", str(folder), "--depth", str(d)])
+    report = capsys.readouterr().out
+    assert "2 feature files" in report
+    assert "_depth.csv" not in report.split("total")[0]
+
+
+def test_several_depth_files_are_pooled(tmp_path, capsys):
+    """Five days as one download and one day as another is a billing
+    accident, not a fact about the data."""
+    folder = tmp_path / "features"
+    _day(folder, "20260826", LONG)
+    _day(folder, "20260827", [s.replace("08-26", "08-27") for s in LONG])
+
+    d1, d2 = tmp_path / "d1.csv", tmp_path / "d2.csv"
+    _depth_priced(d1, LONG, [4710.3] * len(LONG))
+    _depth_priced(d2, [s.replace("08-26", "08-27") for s in LONG],
+                  [4710.3] * len(LONG))
+
+    assert main(["--features", str(folder),
+                 "--depth", str(d1), str(d2)]) == 0
+    assert "wrote 2 of 2 merged files" in capsys.readouterr().out

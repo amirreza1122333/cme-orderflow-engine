@@ -79,23 +79,141 @@ def load(path: Path, what: str) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
+def _feature_files(target: Path) -> list[Path]:
+    """One file, or every feature file in a directory.
+
+    Merging six days by hand is six commands and six filenames, and the
+    mistake that costs an afternoon is not a crash - it is one day silently
+    merged against the wrong depth file, or skipped entirely, discovered
+    later as a gap in the training set.
+    """
+    if target.is_dir():
+        found = sorted(p for p in target.glob("ict_*.csv")
+                       if not p.stem.endswith("_depth"))
+        if not found:
+            raise SystemExit(f"no ict_*.csv files in {target}/")
+        return found
+    return [target]
+
+
+def _merge_many(targets: list[Path], by_time: dict, args) -> int:
+    """Merge each day, then report them together.
+
+    The per-file line matters less than the last two: a run where one day
+    matched nothing is a run where the training set quietly lost a day, and
+    that has to be visible without reading six blocks of output.
+    """
+    print(f"{len(targets)} feature files, {len(by_time):,} depth bars\n")
+    print(f"  {'file':38}{'rows':>7}{'matched':>9}{'share':>8}")
+    print("  " + "-" * 62)
+
+    written, total_rows, total_matched, empty_days = 0, 0, 0, []
+    for path in targets:
+        rows = load(path, "features")
+        merged, matched, basis = _merge_one(rows, by_time)
+        share = matched / len(rows) if rows else 0.0
+        print(f"  {path.name:38}{len(rows):>7,}{matched:>9,}{share:>7.1%}")
+        total_rows += len(rows)
+        total_matched += matched
+        if share < args.min_match:
+            empty_days.append(path.name)
+            continue
+        _write(merged, path, args, matched, share, basis)
+        written += 1
+
+    overall = total_matched / total_rows if total_rows else 0.0
+    print(f"\n  {'total':38}{total_rows:>7,}{total_matched:>9,}"
+          f"{overall:>7.1%}")
+    print(f"\nwrote {written} of {len(targets)} merged files")
+    if empty_days:
+        print(f"SKIPPED, below --min-match {args.min_match:.0%}: "
+              f"{', '.join(empty_days)}")
+        print("  Those days have no depth. Training on the rest is fine; "
+              "training on all of them is not.")
+    return 0
+
+
+def _merge_one(features: list[dict], by_time: dict):
+    matched = 0
+    merged: list[dict] = []
+    basis: list[float] = []
+    for row in features:
+        out = dict(row)
+        found = by_time.get(normalise(row["timestamp"]))
+        if found:
+            matched += 1
+            for name in FILLED + CARRIED:
+                out[name] = found[name]
+            sample = _basis_of(row, found)
+            if sample is not None:
+                basis.append(sample)
+        else:
+            for name in CARRIED:
+                out.setdefault(name, "")
+        merged.append(out)
+    return merged, matched, basis
+
+
+def _write(merged: list[dict], source: Path, args, matched: int,
+           share: float, basis: list[float]) -> Path:
+    out_path = source.with_name(source.stem + "_depth.csv")
+    with out_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(merged[0]))
+        writer.writeheader()
+        writer.writerows(merged)
+    out_path.with_suffix(".meta.json").write_text(json.dumps({
+        "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "features_from": str(source),
+        "depth_from": [str(p) for p in args.depth],
+        "rows": len(merged),
+        "matched": matched,
+        "match_share": round(share, 4),
+        "basis_median": (round(sorted(basis)[len(basis) // 2], 2)
+                         if basis else None),
+        "warning": (
+            "CROSS-INSTRUMENT: the l2_* columns are GC (COMEX gold futures); "
+            "every other column is XAUUSD. Gold's price discovery happens in "
+            "the futures book, so the imbalance is plausibly informative "
+            "about spot - but a model trained on this is being told about a "
+            "market it does not trade."
+        ),
+        "columns_filled": list(FILLED),
+        "columns_added": list(CARRIED),
+    }, indent=2), encoding="utf-8")
+    return out_path
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--features", type=Path, required=True)
-    parser.add_argument("--depth", type=Path, required=True)
+    parser.add_argument("--features", type=Path, required=True,
+                        help="a feature CSV, or a directory of them")
+    parser.add_argument("--depth", type=Path, nargs="+", required=True,
+                        help="one or more depth CSVs; they are pooled, so a "
+                             "multi-day file and a single-day one can be "
+                             "given together")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--min-match", type=float, default=0.5,
                         help="fail below this share of feature rows matched")
     args = parser.parse_args(argv)
 
-    features = load(args.features, "features")
-    depth = load(args.depth, "depth")
-    if not features:
-        raise SystemExit(f"{args.features} has no rows")
+    # One depth pool, however many files it came in. Whether the caller
+    # downloaded five days as one file or five is an accident of billing, not
+    # a fact about the data.
+    depth: list[dict] = []
+    for path in args.depth:
+        depth += load(path, "depth")
     if not depth:
-        raise SystemExit(f"{args.depth} has no rows")
-
+        raise SystemExit("the depth file(s) hold no rows")
     by_time = {normalise(row["timestamp"]): row for row in depth}
+
+    targets = _feature_files(args.features)
+    if len(targets) > 1:
+        return _merge_many(targets, by_time, args)
+
+    features = load(targets[0], "features")
+    if not features:
+        raise SystemExit(f"{targets[0]} has no rows")
+    args.features = targets[0]
     matched = 0
     merged: list[dict] = []
     basis: list[float] = []
