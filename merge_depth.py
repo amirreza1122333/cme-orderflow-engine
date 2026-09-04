@@ -248,3 +248,7 @@ def _report_basis(pairs: list[float]) -> None:
     else:
         print("  Tight through the bulk and the tails - the two feeds agree "
               "about gold and the join is sound.")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

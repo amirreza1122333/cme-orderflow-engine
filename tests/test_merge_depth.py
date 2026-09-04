@@ -198,3 +198,35 @@ def test_no_price_columns_means_no_basis_line(tmp_path, capsys):
     _depth(d, LONG)
     main(["--features", str(f), "--depth", str(d)])
     assert "basis" not in capsys.readouterr().out
+
+
+def test_the_module_actually_runs_as_a_script(tmp_path):
+    """Twelve tests passed while the file had no entry point at all.
+
+    They all call `main()` directly, so an edit that removed the
+    `if __name__ == "__main__"` block left every one of them green and the
+    command silently did nothing - no output, no error, exit code 0. A test
+    suite that never invokes the program the way a person invokes it cannot
+    see that class of break.
+    """
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    f, d = tmp_path / "f.csv", tmp_path / "d.csv"
+    _features(f, LONG)
+    _depth(d, LONG)
+
+    module = _Path(__file__).resolve().parent.parent / "merge_depth.py"
+    if not module.exists():                      # tests/ layout on the VPS
+        module = _Path(__file__).resolve().parent / "merge_depth.py"
+
+    done = subprocess.run(
+        [_sys.executable, str(module), "--features", str(f),
+         "--depth", str(d)],
+        capture_output=True, text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "matched" in done.stdout, (
+        f"the script produced no report. stdout={done.stdout!r}"
+    )
