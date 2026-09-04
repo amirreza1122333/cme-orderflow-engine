@@ -98,6 +98,7 @@ def main(argv: list[str]) -> int:
     by_time = {normalise(row["timestamp"]): row for row in depth}
     matched = 0
     merged: list[dict] = []
+    basis: list[float] = []
     for row in features:
         out = dict(row)
         found = by_time.get(normalise(row["timestamp"]))
@@ -105,6 +106,13 @@ def main(argv: list[str]) -> int:
             matched += 1
             for name in FILLED + CARRIED:
                 out[name] = found[name]
+            # Both halves of the pair are in hand exactly here. The top of
+            # book is deliberately NOT copied into the merged row - the
+            # feature contract is thirty-six columns and this file feeds it -
+            # so the comparison has to happen now or not at all.
+            sample = _basis_of(row, found)
+            if sample is not None:
+                basis.append(sample)
         else:
             for name in CARRIED:
                 out.setdefault(name, "")
@@ -174,7 +182,51 @@ def main(argv: list[str]) -> int:
         if min(vals) == max(vals):
             print("  Still constant. The merge ran but the feature is not "
                   "alive - check the depth file first.")
+    _report_basis(basis)
     return 0
+
+
+def _basis_of(feature_row: dict, depth_row: dict) -> float | None:
+    """Futures mid minus spot mid, when both are readable."""
+    try:
+        spot = float(feature_row["mid"])
+        book = (float(depth_row["bid_px_0"]) + float(depth_row["ask_px_0"])) / 2
+    except (KeyError, TypeError, ValueError):
+        return None
+    return book - spot if spot > 0 and book > 0 else None
+
+
+def _report_basis(pairs: list[float]) -> None:
+    """Do the two instruments agree about the price of gold?
+
+    A cross-instrument join always produces columns; whether it produced a
+    consistent picture is a separate question, and the basis - futures price
+    minus spot - answers it for free. Gold's basis is a carry cost: it drifts
+    slowly with rates and time to expiry and is close to flat over one day.
+
+    So a basis that holds within a few points across the session says both
+    feeds decoded correctly and their clocks agree. One that wanders by tens
+    of points, or jumps, says a timestamp is off or a decoder is wrong - and
+    that is a failure which otherwise shows up only as a feature that
+    mysteriously carries no signal, weeks later, with nothing pointing at the
+    cause.
+    """
+    if len(pairs) < 2:
+        return
+
+    low, high = min(pairs), max(pairs)
+    mean = sum(pairs) / len(pairs)
+    print(f"\n{'basis (GC - spot)':18}{mean:>8.2f} mean, "
+          f"{low:.2f} to {high:.2f} over {len(pairs):,} bars")
+    spread = high - low
+    if spread > 20:
+        print(f"  It moves {spread:.1f} points across one session. Gold's "
+              f"basis is a carry cost and should be nearly flat over a day.")
+        print("  Suspect a clock offset or a decoder before trusting any "
+              "feature built on this.")
+    else:
+        print(f"  Steady within {spread:.1f} points - the two feeds agree "
+              f"about gold, so the join is sound.")
 
 
 if __name__ == "__main__":

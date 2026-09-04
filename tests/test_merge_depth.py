@@ -128,3 +128,51 @@ def test_the_cross_instrument_warning_is_recorded_in_the_sidecar(tmp_path):
     assert "CROSS-INSTRUMENT" in meta["warning"]
     assert meta["match_share"] == 1.0
     assert meta["columns_filled"] == ["l2_imbalance_5", "l2_imbalance_3"]
+
+
+def _with_prices(path, stamps, spots, spelling="{}+00:00"):
+    rows = [{"timestamp": spelling.format(s), "mid": str(m),
+             "l2_imbalance_5": "0.0", "l2_imbalance_3": "0.0"}
+            for s, m in zip(stamps, spots)]
+    _write(path, rows, ["timestamp", "mid", "l2_imbalance_5",
+                        "l2_imbalance_3"])
+
+
+def _depth_priced(path, stamps, books):
+    rows = [{"timestamp": f"{s}Z", "l2_levels": "20",
+             "l2_bid_vol_total": "100", "l2_ask_vol_total": "60",
+             "l2_imbalance_5": "0.25", "l2_imbalance_3": "0.25",
+             "bid_px_0": str(b - 0.1), "ask_px_0": str(b + 0.1)}
+            for s, b in zip(stamps, books)]
+    _write(path, rows, ["timestamp", "l2_levels", "l2_bid_vol_total",
+                        "l2_ask_vol_total", "l2_imbalance_5",
+                        "l2_imbalance_3", "bid_px_0", "ask_px_0"])
+
+
+def test_a_steady_basis_is_reported_as_sound(tmp_path, capsys):
+    f, d = tmp_path / "f.csv", tmp_path / "d.csv"
+    _with_prices(f, STAMPS, [4654.8, 4655.2, 4653.9, 4656.1])
+    _depth_priced(d, STAMPS, [4711.9, 4712.4, 4711.0, 4713.2])
+    main(["--features", str(f), "--depth", str(d)])
+    report = capsys.readouterr().out
+    assert "basis (GC - spot)" in report
+    assert "the two feeds agree" in report
+
+
+def test_a_wandering_basis_is_called_out(tmp_path, capsys):
+    """The failure this exists to catch: a clock offset shows up as a basis
+    that moves tens of points inside one session."""
+    f, d = tmp_path / "f.csv", tmp_path / "d.csv"
+    _with_prices(f, STAMPS, [4654.8, 4655.2, 4653.9, 4656.1])
+    _depth_priced(d, STAMPS, [4711.9, 4740.0, 4690.0, 4760.0])
+    main(["--features", str(f), "--depth", str(d)])
+    report = capsys.readouterr().out
+    assert "Suspect a clock offset" in report
+
+
+def test_no_price_columns_means_no_basis_line(tmp_path, capsys):
+    f, d = tmp_path / "f.csv", tmp_path / "d.csv"
+    _features(f, STAMPS)
+    _depth(d, STAMPS)
+    main(["--features", str(f), "--depth", str(d)])
+    assert "basis" not in capsys.readouterr().out
